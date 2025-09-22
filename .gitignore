@@ -1,0 +1,36 @@
+.codex
+.mise.toml
+*.md
+*.html
+backend/vendor
+frontend/node_modules
+
+# macOS system files
+.DS_Store
+
+# Ruby backend artifacts
+backend/tmp
+backend/log
+backend/.bundle/
+backend/coverage/
+
+# Next.js build output
+frontend/.next/
+frontend/out/
+frontend/.turbo/
+frontend/.vercel/
+frontend/coverage/
+
+# Local environment files
+.env
+frontend/.env
+frontend/.env.local
+frontend/.env.development.local
+frontend/.env.production.local
+frontend/.env.test.local
+backend/.env
+
+# Package manager logs
+npm-debug.log*
+yarn-error.log*
+pnpm-debug.log*
