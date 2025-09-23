@@ -9,7 +9,7 @@ usage() {
 Usage: ./start_server.sh [--prod]
 
 Options:
-  --prod       Build and start the Next.js app in production mode (next build/start).
+  --prod       Build and serve the pre-rendered static bundle (next build + npx serve).
   -h, --help   Show this help message.
 USAGE
 }
@@ -46,7 +46,7 @@ EXTRA_ARGS=("--hostname" "$HOST" "--port" "$PORT")
 
 if [[ "$MODE" == "prod" ]]; then
   npm run build
-  npm run start -- "${EXTRA_ARGS[@]}"
+  npm run preview -- --listen "tcp://${HOST}:${PORT}"
 else
   npm run dev -- "${EXTRA_ARGS[@]}"
 fi
