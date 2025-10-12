@@ -34,3 +34,9 @@ backend/.env
 npm-debug.log*
 yarn-error.log*
 pnpm-debug.log*
+
+# Root Node dependencies for scripts
+node_modules/
+
+# Execution logs
+logs/
