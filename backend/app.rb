@@ -251,13 +251,20 @@ module UpdateViewer
 
     def setup_schema
       execute(<<~SQL)
+        CREATE SEQUENCE IF NOT EXISTS repositories_id_seq START 1;
+      SQL
+
+      execute(<<~SQL)
         CREATE TABLE IF NOT EXISTS repositories (
-          id BIGINT PRIMARY KEY GENERATED ALWAYS AS IDENTITY,
+          id BIGINT PRIMARY KEY DEFAULT nextval('repositories_id_seq'),
           organization TEXT NOT NULL,
           name TEXT NOT NULL,
           UNIQUE (organization, name)
         )
       SQL
+
+      ensure_repository_id_default
+      synchronize_repository_sequence
 
       execute(<<~SQL)
         CREATE TABLE IF NOT EXISTS summaries (
@@ -273,6 +280,29 @@ module UpdateViewer
 
     def execute(sql, *bindings)
       connection.execute(sql, *bindings)
+    end
+
+    def ensure_repository_id_default
+      info = query("PRAGMA table_info('repositories')")
+      id_column = info.find { |column| column['name'] == 'id' }
+      return unless id_column
+
+      default_value = id_column['dflt_value'].to_s
+      return unless default_value.strip.empty?
+
+      execute(<<~SQL)
+        ALTER TABLE repositories ALTER COLUMN id SET DEFAULT nextval('repositories_id_seq')
+      SQL
+    rescue DuckDB::Error => e
+      raise unless e.message.match?(/already has|duplicate column/i)
+    end
+
+    def synchronize_repository_sequence
+      max_id_row = query('SELECT COALESCE(MAX(id), 0) AS max_id FROM repositories').first
+      max_id = max_id_row ? max_id_row.fetch('max_id', 0).to_i : 0
+      execute("ALTER SEQUENCE repositories_id_seq RESTART WITH #{max_id + 1}")
+    rescue DuckDB::Error => e
+      raise unless e.message.match?(/unknown sequence/i)
     end
 
     def query(sql, *bindings)
