@@ -3,6 +3,7 @@
 *.md
 *.html
 backend/vendor
+backend/data/
 frontend/node_modules
 
 # macOS system files

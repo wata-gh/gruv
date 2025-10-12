@@ -3,7 +3,7 @@
 A lightweight interface for browsing weekly GitHub activity summaries. The backend indexes Markdown reports generated from a Codex workflow, and the Next.js frontend renders them with a searchable, theme-aware UI.
 
 ## Overview
-- Ruby Roda API exposes repository listings, release history, and pre-rendered Markdown/HTML summaries.
+- Ruby Roda API exposes repository listings, release history, and pre-rendered Markdown/HTML summaries backed by a DuckDB catalog for fast lookups.
 - Next.js app (shadcn UI, Tailwind) consumes the API and presents switchable repositories and date ranges.
 - Markdown snapshots live at the repo root using the `[organization]_[repository]_[YYYY-MM-DD].md` naming pattern.
 
@@ -14,7 +14,7 @@ A lightweight interface for browsing weekly GitHub activity summaries. The backe
 
 ## Getting Started
 1. Install Ruby 3.4.2 (via `mise` is recommended) and Node.js 18+.
-2. Backend: `HOST=127.0.0.1 PORT=9292 ./start_server.sh` (or run under Bundler with `BUNDLE_GEMFILE=backend/Gemfile bundle exec ruby backend/server.rb`). Set `UPDATES_ROOT` if Markdown lives outside the repo, and `ALLOWED_ORIGINS` for stricter CORS.
+2. Backend: `HOST=127.0.0.1 PORT=9292 ./start_server.sh` (or run under Bundler with `BUNDLE_GEMFILE=backend/Gemfile bundle exec ruby backend/server.rb`). Set `UPDATES_ROOT` if Markdown lives outside the repo, `UPDATE_VIEWER_DATABASE` to override the DuckDB file location, and `ALLOWED_ORIGINS` for stricter CORS.
 3. Frontend: `cd frontend && npm install`, then `npm run dev` (`NEXT_PUBLIC_API_BASE_URL` defaults to `http://localhost:9292`). Build and lint with `npm run build` and `npm run lint`.
 
 ## Production Deployment
