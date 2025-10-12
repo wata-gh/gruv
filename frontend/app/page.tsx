@@ -53,6 +53,19 @@ interface SummaryResponse {
   };
 }
 
+interface GenerateSummaryResponse {
+  message: string;
+  repository: {
+    organization: string;
+    repository: string;
+  };
+  output_path?: string;
+  output_filename?: string;
+  thread_id?: string;
+  stdout?: string;
+  stderr?: string;
+}
+
 const fetcher = async (url: string) => {
   const response = await fetch(url);
   if (!response.ok) {
@@ -99,7 +112,8 @@ function useRepositorySelection(repositories?: RepositorySummary[]) {
 
   return {
     selectedRepo,
-    selectRepo: (repo: RepositorySummary) => setSelectedId(formatRepositoryId(repo.organization, repo.repository))
+    selectRepo: (repo: RepositorySummary) => setSelectedId(formatRepositoryId(repo.organization, repo.repository)),
+    selectById: (id: string | null) => setSelectedId(id)
   };
 }
 
@@ -112,16 +126,39 @@ function MarkdownRenderer({ html, markdown }: { html?: string; markdown: string 
 }
 
 export default function HomePage() {
-  const { data: repositoriesData, error: repositoriesError, isLoading: repositoriesLoading } = useSWR<RepositoriesResponse>(
-    `${API_BASE_URL}/repos`,
-    fetcher,
-    { refreshInterval: 60_000 }
-  );
+  const {
+    data: repositoriesData,
+    error: repositoriesError,
+    isLoading: repositoriesLoading,
+    mutate: mutateRepositories
+  } = useSWR<RepositoriesResponse>(`${API_BASE_URL}/repos`, fetcher, { refreshInterval: 60_000 });
 
   const repositories = repositoriesData?.repositories ?? [];
-  const { selectedRepo, selectRepo } = useRepositorySelection(repositories);
+  const { selectedRepo, selectRepo, selectById } = useRepositorySelection(repositories);
 
   const [selectedDate, setSelectedDate] = React.useState<string | null>(null);
+  const [showCreateForm, setShowCreateForm] = React.useState(false);
+  const [newRepoUrl, setNewRepoUrl] = React.useState('');
+  const [isCreating, setIsCreating] = React.useState(false);
+  const [updatingRepoId, setUpdatingRepoId] = React.useState<string | null>(null);
+  const [statusMessage, setStatusMessage] = React.useState<{ type: 'success' | 'error'; text: string } | null>(null);
+
+  const selectedRepoId = React.useMemo(() => {
+    if (!selectedRepo) {
+      return null;
+    }
+    return formatRepositoryId(selectedRepo.organization, selectedRepo.repository);
+  }, [selectedRepo]);
+
+  const isSelectedRepoUpdating = selectedRepoId !== null && updatingRepoId === selectedRepoId;
+
+  React.useEffect(() => {
+    if (!statusMessage) {
+      return;
+    }
+    const timer = window.setTimeout(() => setStatusMessage(null), 8000);
+    return () => window.clearTimeout(timer);
+  }, [statusMessage]);
 
   const repoHistoryKey = React.useMemo(() => {
     if (!selectedRepo) {
@@ -130,7 +167,11 @@ export default function HomePage() {
     return `${API_BASE_URL}/repos/${encodeURIComponent(selectedRepo.organization)}/${encodeURIComponent(selectedRepo.repository)}/history`;
   }, [selectedRepo]);
 
-  const { data: historyData, error: historyError } = useSWR<HistoryResponse>(repoHistoryKey, fetcher, {
+  const {
+    data: historyData,
+    error: historyError,
+    mutate: mutateHistory
+  } = useSWR<HistoryResponse>(repoHistoryKey, fetcher, {
     revalidateOnFocus: false
   });
 
@@ -152,10 +193,91 @@ export default function HomePage() {
   const {
     data: summaryData,
     error: summaryError,
-    isLoading: summaryLoading
+    isLoading: summaryLoading,
+    mutate: mutateSummary
   } = useSWR<SummaryResponse>(summaryKey, fetcher, {
     revalidateOnFocus: false
   });
+
+  const triggerGeneration = React.useCallback(async (payload: Record<string, string>): Promise<GenerateSummaryResponse> => {
+    const response = await fetch(`${API_BASE_URL}/repos/generate`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify(payload)
+    });
+
+    let data: unknown;
+    try {
+      data = await response.json();
+    } catch (error) {
+      data = undefined;
+    }
+
+    if (!response.ok) {
+      const message = typeof data === 'object' && data !== null && 'error' in data && typeof (data as { error: unknown }).error === 'string'
+        ? (data as { error: string }).error
+        : 'Failed to generate summary.';
+      throw new Error(message);
+    }
+
+    return data as GenerateSummaryResponse;
+  }, []);
+
+  const handleUpdateRepository = React.useCallback(
+    async (repo: RepositorySummary) => {
+      const repoId = formatRepositoryId(repo.organization, repo.repository);
+      setStatusMessage(null);
+      setUpdatingRepoId(repoId);
+
+      try {
+        const result = await triggerGeneration({ organization: repo.organization, repository: repo.repository });
+        const messageSuffix = result.output_filename ? ` (${result.output_filename})` : '';
+        setStatusMessage({ type: 'success', text: `Summary generated for ${repoId}${messageSuffix}.` });
+        await mutateRepositories();
+
+        if (selectedRepo && formatRepositoryId(selectedRepo.organization, selectedRepo.repository) === repoId) {
+          setSelectedDate(null);
+          await Promise.all([mutateHistory(), mutateSummary()]);
+        }
+      } catch (error) {
+        const message = error instanceof Error ? error.message : 'Failed to generate summary.';
+        setStatusMessage({ type: 'error', text: message });
+      } finally {
+        setUpdatingRepoId(null);
+      }
+    },
+    [mutateHistory, mutateRepositories, mutateSummary, selectedRepo, triggerGeneration]
+  );
+
+  const handleCreateRepository = React.useCallback(async () => {
+    const trimmed = newRepoUrl.trim();
+    if (!trimmed) {
+      setStatusMessage({ type: 'error', text: 'Repository URL is required.' });
+      return;
+    }
+
+    setStatusMessage(null);
+    setIsCreating(true);
+
+    try {
+      const result = await triggerGeneration({ url: trimmed });
+      const repoId = formatRepositoryId(result.repository.organization, result.repository.repository);
+      const messageSuffix = result.output_filename ? ` (${result.output_filename})` : '';
+      setStatusMessage({ type: 'success', text: `Summary generated for ${repoId}${messageSuffix}.` });
+      setNewRepoUrl('');
+      setShowCreateForm(false);
+      selectById(repoId);
+      setSelectedDate(null);
+      await mutateRepositories();
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Failed to generate summary.';
+      setStatusMessage({ type: 'error', text: message });
+    } finally {
+      setIsCreating(false);
+    }
+  }, [mutateRepositories, newRepoUrl, selectById, triggerGeneration]);
 
   const isReady = !repositoriesLoading && !summaryLoading;
 
@@ -175,36 +297,84 @@ export default function HomePage() {
             <CardTitle className="text-lg">Repositories</CardTitle>
             <CardDescription>Select a repository to explore summaries.</CardDescription>
           </CardHeader>
-          <CardContent className="pt-2">
+          <CardContent className="flex flex-col gap-4 pt-2">
             {repositoriesLoading && <Skeleton className="h-10 w-full" />}
-            {repositoriesError && (
-              <p className="text-sm text-destructive">Failed to load repositories. Please try again.</p>
+            {repositoriesError && <p className="text-sm text-destructive">Failed to load repositories. Please try again.</p>}
+
+            <div className="flex items-center justify-between">
+              <span className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">Manage</span>
+              <Button
+                type="button"
+                variant="outline"
+                size="icon"
+                aria-label={showCreateForm ? 'Hide repository creation form' : 'Add repository'}
+                onClick={() => setShowCreateForm((previous) => !previous)}
+              >
+                <span className="text-lg leading-none">+</span>
+              </Button>
+            </div>
+
+            {showCreateForm && (
+              <div className="space-y-2">
+                <input
+                  value={newRepoUrl}
+                  onChange={(event) => setNewRepoUrl(event.target.value)}
+                  placeholder="https://github.com/organization/repository"
+                  className="h-10 w-full rounded-md border border-input bg-background px-3 py-2 text-sm shadow-sm focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+                  type="url"
+                  autoComplete="off"
+                />
+                <div className="flex items-center gap-2">
+                  <Button type="button" onClick={handleCreateRepository} disabled={isCreating}>
+                    {isCreating ? 'Creating…' : 'Create'}
+                  </Button>
+                  <Button type="button" variant="ghost" onClick={() => setShowCreateForm(false)} disabled={isCreating}>
+                    Cancel
+                  </Button>
+                </div>
+              </div>
             )}
+
+            {statusMessage && (
+              <div
+                className={cn(
+                  'rounded-md border px-3 py-2 text-sm',
+                  statusMessage.type === 'error'
+                    ? 'border-destructive/40 bg-destructive/10 text-destructive'
+                    : 'border-emerald-500/30 bg-emerald-500/10 text-emerald-700 dark:text-emerald-300'
+                )}
+              >
+                {statusMessage.text}
+              </div>
+            )}
+
             <ScrollArea className="h-[60vh]">
               <div className="flex flex-col gap-2">
                 {repositories.map((repo) => {
                   const id = formatRepositoryId(repo.organization, repo.repository);
                   const isActive = selectedRepo && id === formatRepositoryId(selectedRepo.organization, selectedRepo.repository);
+                  const isUpdating = updatingRepoId === id;
                   return (
-                    <button
-                      key={id}
-                      type="button"
-                      onClick={() => {
-                        selectRepo(repo);
-                        setSelectedDate(null);
-                      }}
-                      className={cn(
-                        'flex flex-col rounded-md border px-3 py-2 text-left transition hover:border-accent hover:bg-accent',
-                        isActive ? 'border-primary bg-primary/10 text-primary-foreground dark:bg-primary/20' : 'border-border'
-                      )}
-                    >
-                      <span className="text-sm font-medium">
-                        {repo.organization}/{repo.repository}
-                      </span>
-                      <span className="text-xs text-muted-foreground">
-                        Latest {repo.latest_date ? formatDateLabel(repo.latest_date) : '—'}
-                      </span>
-                    </button>
+                    <div key={id} className="flex items-start gap-2">
+                      <button
+                        type="button"
+                        onClick={() => {
+                          selectRepo(repo);
+                          setSelectedDate(null);
+                        }}
+                        className={cn(
+                          'flex flex-1 flex-col rounded-md border px-3 py-2 text-left transition hover:border-accent hover:bg-accent',
+                          isActive ? 'border-primary bg-primary/10 text-primary-foreground dark:bg-primary/20' : 'border-border'
+                        )}
+                      >
+                        <span className="text-sm font-medium">
+                          {repo.organization}/{repo.repository}
+                        </span>
+                        <span className="text-xs text-muted-foreground">
+                          {isUpdating ? 'Updating…' : `Latest ${repo.latest_date ? formatDateLabel(repo.latest_date) : '—'}`}
+                        </span>
+                      </button>
+                    </div>
                   );
                 })}
               </div>
@@ -245,9 +415,24 @@ export default function HomePage() {
         </div>
 
         <Card className="w-full flex-none lg:w-72">
-          <CardHeader>
-            <CardTitle className="text-lg">History</CardTitle>
-            <CardDescription>Previous summaries for quick context.</CardDescription>
+          <CardHeader className="flex flex-row items-center justify-between space-y-0">
+            <div>
+              <CardTitle className="text-lg">History</CardTitle>
+              <CardDescription>Previous summaries for quick context.</CardDescription>
+            </div>
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              disabled={!selectedRepo || isSelectedRepoUpdating}
+              onClick={() => {
+                if (selectedRepo) {
+                  handleUpdateRepository(selectedRepo);
+                }
+              }}
+            >
+              {isSelectedRepoUpdating ? 'Generating…' : 'Generate latest'}
+            </Button>
           </CardHeader>
           <CardContent className="pt-2">
             {!selectedRepo && <p className="text-sm text-muted-foreground">Choose a repository to view its history.</p>}
