@@ -38,6 +38,14 @@
         group: root
         mode: "0755"
 
+    - name: Ensure oauth2-proxy configuration directory exists
+      ansible.builtin.file:
+        path: /etc/oauth2-proxy
+        state: directory
+        owner: root
+        group: root
+        mode: "0755"
+
     - name: Write gruv-frontend environment configuration
       ansible.builtin.template:
         src: gruv-frontend.env.j2
@@ -56,6 +64,7 @@
       loop:
         - { src: "gruv-backend.service.j2", dest: "gruv-backend.service" }
         - { src: "gruv-frontend.service.j2", dest: "gruv-frontend.service" }
+        - { src: "oauth2-proxy.service.j2", dest: "oauth2-proxy.service" }
 
     - name: Ensure gruv services are enabled and running
       ansible.builtin.systemd:
@@ -66,3 +75,4 @@
       loop:
         - gruv-backend.service
         - gruv-frontend.service
+        - oauth2-proxy.service
