@@ -4,9 +4,12 @@ require 'date'
 require 'json'
 require 'logger'
 require 'open3'
+require 'pathname'
 require 'roda'
 require 'redcarpet'
 require 'time'
+require 'duckdb'
+require 'fileutils'
 
 module UpdateViewer
   class << self
@@ -114,26 +117,204 @@ module UpdateViewer
     end
   end
 
+  class Database
+    DEFAULT_DB_PATH = File.expand_path('../data/update_viewer.duckdb', __dir__).freeze
+
+    def initialize(path: ENV.fetch('UPDATE_VIEWER_DATABASE', DEFAULT_DB_PATH))
+      @path = path
+      ensure_directory
+      @connection = DuckDB::Database.open(path).connect
+      setup_schema
+    end
+
+    def repository_overview
+      repositories = query(<<~SQL)
+        SELECT organization, name
+        FROM repositories
+        ORDER BY lower(organization), lower(name)
+      SQL
+
+      summaries = query(<<~SQL)
+        SELECT r.organization, r.name, s.summary_date, s.filename
+        FROM summaries s
+        JOIN repositories r ON r.id = s.repository_id
+      SQL
+
+      grouped = summaries.group_by { |row| [row['organization'], row['name']] }
+
+      repositories.map do |row|
+        key = [row['organization'], row['name']]
+        summary_rows = Array(grouped[key]).sort_by { |summary| parse_date(summary['summary_date']) }.reverse
+        latest = summary_rows.first
+
+        {
+          organization: row['organization'],
+          repository: row['name'],
+          latest_date: latest && parse_date(latest['summary_date']),
+          latest_filename: latest && latest['filename'],
+          available_dates: summary_rows.map { |summary| parse_date(summary['summary_date']) }
+        }
+      end
+    end
+
+    def history(organization, repository)
+      sql = <<~SQL
+        SELECT
+          r.organization,
+          r.name,
+          s.summary_date,
+          s.filename,
+          s.relative_path
+        FROM summaries s
+        JOIN repositories r ON r.id = s.repository_id
+        WHERE lower(r.organization) = lower(?)
+          AND lower(r.name) = lower(?)
+        ORDER BY s.summary_date DESC
+      SQL
+
+      query(sql, organization, repository).map do |row|
+        summary_record(row)
+      end
+    end
+
+    def find_summary(organization, repository, date)
+      sql = <<~SQL
+        SELECT
+          r.organization,
+          r.name,
+          s.summary_date,
+          s.filename,
+          s.relative_path
+        FROM summaries s
+        JOIN repositories r ON r.id = s.repository_id
+        WHERE lower(r.organization) = lower(?)
+          AND lower(r.name) = lower(?)
+          AND s.summary_date = ?
+        LIMIT 1
+      SQL
+
+      row = query(sql, organization, repository, date).first
+      row && summary_record(row)
+    end
+
+    def store_summary(organization:, repository:, date:, filename:, relative_path:)
+      repo_id = ensure_repository(organization, repository)
+      sql = <<~SQL
+        INSERT OR REPLACE INTO summaries (repository_id, summary_date, filename, relative_path)
+        VALUES (?, ?, ?, ?)
+      SQL
+      execute(sql, repo_id, date, filename, relative_path)
+    end
+
+    def empty?
+      repository_count.zero?
+    end
+
+    private
+
+    attr_reader :connection, :path
+
+    def summary_record(row)
+      {
+        organization: row['organization'],
+        repository: row['name'],
+        date: parse_date(row['summary_date']),
+        filename: row['filename'],
+        relative_path: row['relative_path']
+      }
+    end
+
+    def ensure_repository(organization, repository)
+      existing = query(
+        'SELECT id FROM repositories WHERE lower(organization) = lower(?) AND lower(name) = lower(?) LIMIT 1',
+        organization,
+        repository
+      ).first
+
+      return existing['id'] if existing
+
+      execute('INSERT INTO repositories (organization, name) VALUES (?, ?)', organization, repository)
+      query(
+        'SELECT id FROM repositories WHERE organization = ? AND name = ? LIMIT 1',
+        organization,
+        repository
+      ).first.fetch('id')
+    end
+
+    def repository_count
+      query('SELECT COUNT(*) AS count FROM repositories').first.fetch('count', 0).to_i
+    end
+
+    def ensure_directory
+      FileUtils.mkdir_p(File.dirname(path))
+    end
+
+    def setup_schema
+      execute(<<~SQL)
+        CREATE TABLE IF NOT EXISTS repositories (
+          id BIGINT PRIMARY KEY GENERATED ALWAYS AS IDENTITY,
+          organization TEXT NOT NULL,
+          name TEXT NOT NULL,
+          UNIQUE (organization, name)
+        )
+      SQL
+
+      execute(<<~SQL)
+        CREATE TABLE IF NOT EXISTS summaries (
+          repository_id BIGINT NOT NULL,
+          summary_date DATE NOT NULL,
+          filename TEXT NOT NULL,
+          relative_path TEXT NOT NULL,
+          created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+          PRIMARY KEY (repository_id, summary_date)
+        )
+      SQL
+    end
+
+    def execute(sql, *bindings)
+      connection.execute(sql, *bindings)
+    end
+
+    def query(sql, *bindings)
+      result = execute(sql, *bindings)
+      rows = []
+      result.each(hash: true) { |row| rows << row }
+      rows
+    end
+
+    def parse_date(value)
+      return if value.nil?
+      case value
+      when Date
+        value
+      when Time
+        value.to_date
+      else
+        Date.parse(value.to_s)
+      end
+    end
+
+  end
+
   class Catalog
     FILENAME_PATTERN = /\A(?<organization>.+?)_(?<repository>.+)_(?<date>\d{4}-\d{2}-\d{2})\.md\z/.freeze
 
-    attr_reader :root
+    attr_reader :root, :database
 
-    def initialize(root: ENV.fetch('UPDATES_ROOT', default_root))
+    def initialize(root: ENV.fetch('UPDATES_ROOT', default_root), database: Database.new)
       @root = root
+      @database = database
+      synchronize_filesystem!
     end
 
     def repositories
-      grouped_entries.keys.sort_by { |org, repo| [org.downcase, repo.downcase] }.map do |org, repo|
-        entries = grouped_entries[[org, repo]].sort_by { |entry| entry.date }.reverse
-        latest = entries.first
-
+      database.repository_overview.map do |record|
         {
-          organization: org,
-          repository: repo,
-          latest_date: latest&.date,
-          latest_filename: latest && File.basename(latest.path),
-          available_dates: entries.map(&:date)
+          organization: record[:organization],
+          repository: record[:repository],
+          latest_date: record[:latest_date],
+          latest_filename: record[:latest_filename],
+          available_dates: record[:available_dates]
         }
       end
     end
@@ -143,14 +324,18 @@ module UpdateViewer
     end
 
     def history(organization, repository)
-      key = normalize_key(organization, repository)
-      entries = grouped_entries.fetch(key) { raise(NotFound, 'Repository not found') }
-      entries.sort_by(&:date).reverse
+      records = database.history(organization, repository)
+      raise(NotFound, 'Repository not found') if records.empty?
+
+      records.map { |record| build_entry_from_record(record) }
     end
 
     def entry_for(organization, repository, date_str)
       date = parse_date(date_str)
-      history(organization, repository).find { |entry| entry.date == date } || raise(NotFound, 'Summary not found')
+      record = database.find_summary(organization, repository, date)
+      raise(NotFound, 'Summary not found') unless record
+
+      build_entry_from_record(record)
     end
 
     def markdown_for(entry)
@@ -161,49 +346,33 @@ module UpdateViewer
       markdown_renderer.render(markdown_for(entry))
     end
 
+    def register_summary_from_path(path)
+      entry = build_entry(path)
+      return unless entry
+
+      database.store_summary(
+        organization: entry.organization,
+        repository: entry.repository,
+        date: entry.date,
+        filename: File.basename(path),
+        relative_path: relative_path_for(path)
+      )
+
+      entry
+    end
+
     private
+
+    def synchronize_filesystem!
+      return unless database.empty?
+
+      markdown_paths.each do |path|
+        register_summary_from_path(path)
+      end
+    end
 
     def default_root
       File.expand_path('..', __dir__)
-    end
-
-    def grouped_entries
-      @grouped_entries = nil if cache_stale?
-      @grouped_entries ||= build_index
-    end
-
-    def cache_stale?
-      current_mtime = latest_mtime
-      if defined?(@last_mtime)
-        current_mtime != @last_mtime
-      else
-        @last_mtime = current_mtime
-        false
-      end
-    end
-
-    def latest_mtime
-      markdown_paths.map { |path| File.mtime(path) }.max
-    rescue StandardError
-      Time.at(0)
-    end
-
-    def markdown_paths
-      Dir.glob(File.join(root, '*.md')).select { |path| File.file?(path) && path.match?(FILENAME_PATTERN) }
-    end
-
-    def build_index
-      index = Hash.new { |hash, key| hash[key] = [] }
-
-      markdown_paths.each do |path|
-        entry = build_entry(path)
-        next unless entry
-
-        index[[entry.organization, entry.repository]] << entry
-      end
-
-      @last_mtime = latest_mtime
-      index
     end
 
     def build_entry(path)
@@ -220,14 +389,31 @@ module UpdateViewer
       nil
     end
 
-    def parse_date(date_str)
-      Date.parse(date_str)
+    def build_entry_from_record(record)
+      Entry.new(
+        organization: record[:organization],
+        repository: record[:repository],
+        date: record[:date],
+        path: absolute_path_for(record[:relative_path])
+      )
     end
 
-    def normalize_key(organization, repository)
-      grouped_entries.keys.find do |org, repo|
-        org.casecmp?(organization) && repo.casecmp?(repository)
-      end || [organization, repository]
+    def absolute_path_for(relative_path)
+      File.expand_path(relative_path, root)
+    end
+
+    def relative_path_for(path)
+      Pathname.new(path).relative_path_from(Pathname.new(root)).to_s
+    rescue ArgumentError
+      File.basename(path)
+    end
+
+    def markdown_paths
+      Dir.glob(File.join(root, '*.md')).select { |path| File.file?(path) && path.match?(FILENAME_PATTERN) }
+    end
+
+    def parse_date(date_str)
+      Date.parse(date_str.to_s)
     end
 
     def markdown_renderer
@@ -325,6 +511,16 @@ module UpdateViewer
               "[generate] Validation error for #{repo[:organization]}/#{repo[:repository]} message=#{e.message}"
             )
             next({ error: e.message })
+          end
+
+          if result.output_path
+            begin
+              catalog.register_summary_from_path(result.output_path)
+            rescue StandardError => e
+              UpdateViewer.logger.error(
+                "[generate] Failed to register summary for #{repo[:organization]}/#{repo[:repository]} path=#{result.output_path} error=#{e.message}"
+              )
+            end
           end
 
           response.status = 200
