@@ -1,0 +1,27 @@
+[Unit]
+Description=oauth2-proxy
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=ec2-user
+Group=ec2-user
+EnvironmentFile=-/etc/oauth2-proxy/oauth2-proxy.env
+
+# 環境変数で十分に設定可能な項目は Environment に寄せる
+Environment=OAUTH2_PROXY_PROVIDER=google
+Environment=OAUTH2_PROXY_HTTP_ADDRESS=127.0.0.1:4180
+Environment=OAUTH2_PROXY_UPSTREAMS=file:///dev/null
+Environment=OAUTH2_PROXY_COOKIE_SECURE=true
+Environment=OAUTH2_PROXY_OIDC_ISSUER_URL=https://accounts.google.com
+
+# 実行ファイルのみ起動（引数は不要）
+ExecStart=/home/ec2-user/bin/oauth2-proxy
+
+Restart=on-failure
+RestartSec=5
+# 任意：ログ行長を緩和
+# Environment=OAUTH2_PROXY_SILENCE_PING_LOG=true
+
+[Install]
+WantedBy=multi-user.target
