@@ -19,31 +19,36 @@ module UpdateViewer
       @host = host
       @port = port
       @allowed_origins = (ENV['ALLOWED_ORIGINS']&.split(',') || ['*']).map(&:strip)
+      @logger = UpdateViewer.logger
     end
 
     def start
       TCPServer.open(host, port) do |server|
-        puts "UpdateViewer backend listening on http://#{display_host}:#{port}" if $stdout.tty?
+        logger.info("[server] Listening on http://#{display_host}:#{port}")
         loop do
           client = server.accept
           Thread.new { handle_client(client) }
         end
       end
     rescue Errno::EACCES, Errno::EADDRINUSE, Errno::EPERM => e
-      warn "[server] Failed to bind to #{host}:#{port} - #{e.message}"
+      logger.fatal("[server] Failed to bind to #{host}:#{port} - #{e.class}: #{e.message}")
       exit 1
     end
 
     private
 
-    attr_reader :app, :host, :port
+    attr_reader :app, :host, :port, :logger
 
     def handle_client(socket)
+      method = request_target = http_version = nil
       request_line = socket.gets
       return socket.close unless request_line
 
       method, request_target, http_version = request_line.split
-      return respond_with_bad_request(socket) unless method && request_target && http_version
+      unless method && request_target && http_version
+        logger.warn("[server] Malformed request line: #{request_line.strip}")
+        return respond_with_bad_request(socket)
+      end
 
       headers = read_headers(socket)
       body = read_body(socket, headers)
@@ -56,12 +61,15 @@ module UpdateViewer
 
       env = build_env(method, request_target, headers, body, socket)
 
+      body_enum = nil
       status, response_headers, body_enum = app.call(env)
       response_headers = apply_cors_headers(response_headers, origin)
 
       write_response(socket, status, response_headers, body_enum)
     rescue StandardError => e
-      warn "[server] Error handling request: #{e.class} - #{e.message}"
+      logger.error(
+        "[server] Error handling request #{method} #{request_target} - #{e.class}: #{e.message}\n#{Array(e.backtrace).join("\n")}"
+      )
       respond_with_internal_error(socket)
     ensure
       body_enum&.close if defined?(body_enum) && body_enum.respond_to?(:close)

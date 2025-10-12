@@ -2,11 +2,40 @@
 
 require 'date'
 require 'json'
+require 'logger'
 require 'open3'
 require 'roda'
 require 'redcarpet'
+require 'time'
 
 module UpdateViewer
+  class << self
+    def logger
+      @logger ||= build_logger
+    end
+
+    private
+
+    def build_logger
+      logger = Logger.new($stderr)
+      logger.level = log_level_from_env
+      logger.formatter = proc do |severity, datetime, progname, msg|
+        timestamp = datetime.utc.iso8601
+        label = progname ? "[#{progname}] " : ''
+        payload = msg.is_a?(String) ? msg : msg.inspect
+        "#{timestamp} #{severity.ljust(5)} #{label}#{payload}\n"
+      end
+      logger
+    end
+
+    def log_level_from_env
+      level_name = ENV.fetch('LOG_LEVEL', 'INFO').to_s.upcase
+      Logger.const_get(level_name)
+    rescue NameError
+      Logger::INFO
+    end
+  end
+
   class NotFound < StandardError; end
 
   Entry = Struct.new(:organization, :repository, :date, :path, keyword_init: true) do
@@ -225,10 +254,13 @@ module UpdateViewer
     plugin :error_handler do |error|
       case error
       when NotFound
+        UpdateViewer.logger.warn("[app] NotFound path=#{request.path} method=#{request.request_method} message=#{error.message}")
         response.status = 404
         { error: error.message }
       else
-        warn "[error] #{error.class}: #{error.message}\n#{error.backtrace.join("\n")}"
+        UpdateViewer.logger.error(
+          "[app] Unhandled error path=#{request.path} method=#{request.request_method} error=#{error.class}: #{error.message}\n#{Array(error.backtrace).join("\n")}"
+        )
         response.status = 500
         { error: 'Internal server error' }
       end
@@ -266,6 +298,9 @@ module UpdateViewer
             repo = normalize_repository_reference(payload)
           rescue ArgumentError => e
             response.status = 400
+            UpdateViewer.logger.warn(
+              "[generate] Invalid repository reference from payload_keys=#{payload.keys.join(',')} error=#{e.message}"
+            )
             next({ error: e.message })
           end
 
@@ -274,6 +309,9 @@ module UpdateViewer
           begin
             result = generator.call
           rescue SummaryGenerator::ExecutionError => e
+            UpdateViewer.logger.error(
+              "[generate] Execution failed for #{repo[:organization]}/#{repo[:repository]} status=#{e.status} stdout=#{sanitize_output(e.stdout)} stderr=#{sanitize_output(e.stderr)}"
+            )
             response.status = 500
             next({
               error: e.message,
@@ -283,6 +321,9 @@ module UpdateViewer
             })
           rescue ArgumentError => e
             response.status = 400
+            UpdateViewer.logger.warn(
+              "[generate] Validation error for #{repo[:organization]}/#{repo[:repository]} message=#{e.message}"
+            )
             next({ error: e.message })
           end
 
@@ -396,6 +437,14 @@ module UpdateViewer
       end
 
       [organization, repository]
+    end
+
+    def sanitize_output(value, limit: 800)
+      text = value.to_s.strip
+      return '' if text.empty?
+      return text if text.length <= limit
+
+      "#{text[0, limit]}...(truncated)"
     end
   end
 end
