@@ -16,6 +16,11 @@
 - Discussion活動: [Discussion activity summary]
 - リリース: [Release summary]
 
+## まとめ（この期間のトレンド）
+- [期間の特徴・トレンド①]
+- [期間の特徴・トレンド②]
+- [期間の特徴・トレンド③]
+
 ## Pull Request（主な動き）
 - 直近更新PR例
   - [#[number] [state]: [title]](https://github.com/[org]/[repo]/pull/[number])
@@ -49,11 +54,6 @@
 - 特徴
   - [期間内のリリース運用の特徴を箇条書きで記載]
 - 参考: https://github.com/[org]/[repo]/releases
-
-## まとめ（この期間のトレンド）
-- [期間の特徴・トレンド①]
-- [期間の特徴・トレンド②]
-- [期間の特徴・トレンド③]
 
 ## 参考リンク
 - PR検索: https://github.com/[org]/[repo]/pulls?q=is%3Apr+updated%3A%3E%3D[start date]
