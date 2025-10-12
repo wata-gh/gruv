@@ -1,0 +1,14 @@
+[Unit]
+Description=Gruv Backend Ruby Service
+After=network.target
+
+[Service]
+Type=simple
+User=ec2-user
+WorkingDirectory=/home/ec2-user/ws/gruv/backend
+ExecStart=/home/ec2-user/ws/gruv/backend/start_server.sh
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

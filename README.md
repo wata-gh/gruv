@@ -23,6 +23,23 @@ A lightweight interface for browsing weekly GitHub activity summaries. The backe
 - `./frontend/start_server.sh --prod` wraps this flow locally by running `npm run build` followed by `npm run preview -- --listen tcp://$HOST:$PORT` (defaults: `0.0.0.0:3000`).
 - Keep environment variables such as `NEXT_PUBLIC_API_BASE_URL` available at build time if you rely on non-default API origins.
 
+## Automated Provisioning (ansible-pull)
+Systemd unit templates for both services live under `ansible/templates/` and are wired into the playbook at `ansible/site.yml`. The playbook copies the units into `/etc/systemd/system/`, reloads the daemon, and ensures `gruv-backend` and `gruv-frontend` are enabled and running with the production settings used in our EC2 environment.
+
+The frontend unit now loads public runtime configuration from `/etc/gruv/gruv-frontend.env`, keeping deployment-specific values
+such as `NEXT_PUBLIC_API_BASE_URL` out of source control. Provide the API base URL when running the playbook so Ansible can
+render the environment file before starting the service.
+
+Run the playbook directly from this repository with `ansible-pull` after cloning to `/home/ec2-user/ws/gruv`:
+
+```bash
+sudo ansible-pull \
+  -U <repository_url> \
+  -d /home/ec2-user/ws/gruv \
+  -e "next_public_api_base_url=https://your.backend.domain" \
+  ansible/site.yml
+```
+
 ## Testing & Quality
 - Backend tests are not scaffolded yet; add `_test.rb` files using Minitest or RSpec and mock filesystem access to the Markdown catalog.
 - Frontend relies on ESLint + Prettier; consider adding Playwright or Cypress suites for end-to-end coverage and snapshot key Markdown views.
