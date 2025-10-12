@@ -11,6 +11,25 @@
           - next_public_api_base_url | length > 0
         fail_msg: "Set next_public_api_base_url via --extra-vars or inventory so the frontend can reach the backend API."
 
+    - name: Install required system packages
+      ansible.builtin.dnf:
+        name:
+          - tmux
+          - ansible-core
+          - git
+        state: present
+        update_cache: true
+
+    - name: Install tmux configuration for ec2-user
+      ansible.builtin.copy:
+        content: |
+          set-option -g prefix C-t
+          bind-key C-t send-prefix
+        dest: /home/ec2-user/.tmux.conf
+        owner: ec2-user
+        group: ec2-user
+        mode: "0644"
+
     - name: Ensure gruv configuration directory exists
       ansible.builtin.file:
         path: /etc/gruv
