@@ -1,0 +1,23 @@
+{
+  "name": "gruv",
+  "version": "1.0.0",
+  "description": "A lightweight interface for browsing weekly GitHub activity summaries. The backend indexes Markdown reports generated from a Codex workflow, and the Next.js frontend renders them with a searchable, theme-aware UI.",
+  "main": "index.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+ssh://git@github.com/wata-gh/gruv.git"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "bugs": {
+    "url": "https://github.com/wata-gh/gruv/issues"
+  },
+  "homepage": "https://github.com/wata-gh/gruv#readme",
+  "dependencies": {
+    "@openai/codex-sdk": "^0.46.0"
+  }
+}
