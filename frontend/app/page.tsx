@@ -3,6 +3,8 @@
 import * as React from 'react';
 import useSWR from 'swr';
 
+import { Loader2, Plus, RefreshCcw } from 'lucide-react';
+
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { ScrollArea } from '@/components/ui/scroll-area';
@@ -310,7 +312,7 @@ export default function HomePage() {
                 aria-label={showCreateForm ? 'Hide repository creation form' : 'Add repository'}
                 onClick={() => setShowCreateForm((previous) => !previous)}
               >
-                <span className="text-lg leading-none">+</span>
+                <Plus className="h-4 w-4" aria-hidden="true" />
               </Button>
             </div>
 
@@ -423,15 +425,20 @@ export default function HomePage() {
             <Button
               type="button"
               variant="outline"
-              size="sm"
+              size="icon"
               disabled={!selectedRepo || isSelectedRepoUpdating}
+              aria-label={isSelectedRepoUpdating ? 'Generating latest summary' : 'Generate latest summary'}
               onClick={() => {
                 if (selectedRepo) {
                   handleUpdateRepository(selectedRepo);
                 }
               }}
             >
-              {isSelectedRepoUpdating ? 'Generating…' : 'Generate latest'}
+              {isSelectedRepoUpdating ? (
+                <Loader2 className="h-4 w-4 animate-spin" aria-hidden="true" />
+              ) : (
+                <RefreshCcw className="h-4 w-4" aria-hidden="true" />
+              )}
             </Button>
           </CardHeader>
           <CardContent className="pt-2">
