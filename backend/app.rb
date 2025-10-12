@@ -2,6 +2,7 @@
 
 require 'date'
 require 'json'
+require 'open3'
 require 'roda'
 require 'redcarpet'
 
@@ -16,6 +17,71 @@ module UpdateViewer
         date: date,
         filename: File.basename(path)
       }
+    end
+  end
+
+  class SummaryGenerator
+    class ExecutionError < StandardError
+      attr_reader :stdout, :stderr, :status
+
+      def initialize(message, stdout:, stderr:, status:)
+        super(message)
+        @stdout = stdout
+        @stderr = stderr
+        @status = status
+      end
+    end
+
+    SCRIPT_PATH = File.expand_path('../scripts/generate_summary.mjs', __dir__)
+    REPOSITORY_ROOT = File.expand_path('..', __dir__)
+
+    Result = Struct.new(:stdout, :stderr, :thread_id, :output_path, keyword_init: true)
+
+    def initialize(organization, repository)
+      @organization = organization
+      @repository = repository
+    end
+
+    def call
+      validate_inputs!
+      ensure_script_presence!
+
+      stdout, stderr, status = Open3.capture3('node', SCRIPT_PATH, organization, repository, chdir: REPOSITORY_ROOT)
+
+      unless status.success?
+        raise ExecutionError.new('Summary generation failed', stdout: stdout, stderr: stderr, status: status.exitstatus)
+      end
+
+      Result.new(
+        stdout: stdout,
+        stderr: stderr,
+        thread_id: extract_thread_id(stdout),
+        output_path: extract_output_path(stdout)
+      )
+    end
+
+    private
+
+    attr_reader :organization, :repository
+
+    def validate_inputs!
+      if organization.to_s.strip.empty? || repository.to_s.strip.empty?
+        raise ArgumentError, 'organization and repository must be provided'
+      end
+    end
+
+    def ensure_script_presence!
+      return if File.exist?(SCRIPT_PATH)
+
+      raise ExecutionError.new('Summary helper script not found', stdout: '', stderr: "Missing script at #{SCRIPT_PATH}", status: -1)
+    end
+
+    def extract_thread_id(stdout)
+      stdout.lines.find { |line| line.start_with?('Thread ID:') }&.split(':', 2)&.last&.strip
+    end
+
+    def extract_output_path(stdout)
+      stdout.lines.find { |line| line.start_with?('Summary written to') }&.split('Summary written to', 2)&.last&.strip
     end
   end
 
@@ -194,6 +260,44 @@ module UpdateViewer
           { repositories: catalog.repositories }
         end
 
+        r.post 'generate' do
+          payload = parse_json_body(r)
+          begin
+            repo = normalize_repository_reference(payload)
+          rescue ArgumentError => e
+            response.status = 400
+            next({ error: e.message })
+          end
+
+          generator = SummaryGenerator.new(repo[:organization], repo[:repository])
+
+          begin
+            result = generator.call
+          rescue SummaryGenerator::ExecutionError => e
+            response.status = 500
+            next({
+              error: e.message,
+              stdout: e.stdout.to_s.strip,
+              stderr: e.stderr.to_s.strip,
+              status: e.status
+            })
+          rescue ArgumentError => e
+            response.status = 400
+            next({ error: e.message })
+          end
+
+          response.status = 200
+          {
+            message: 'Summary generation completed',
+            repository: repo,
+            output_path: result.output_path,
+            output_filename: result.output_path && File.basename(result.output_path),
+            thread_id: result.thread_id,
+            stdout: result.stdout.to_s.strip,
+            stderr: result.stderr.to_s.strip
+          }
+        end
+
         r.on String, String do |organization, repository|
           r.get 'latest' do
             entry = catalog.latest_entry(organization, repository)
@@ -236,6 +340,62 @@ module UpdateViewer
           html: catalog.html_for(entry)
         }
       }
+    end
+
+    def parse_json_body(request)
+      raw = request.body.read.to_s
+      request.body.rewind if request.body.respond_to?(:rewind)
+      return {} if raw.empty?
+
+      JSON.parse(raw)
+    rescue JSON::ParserError
+      raise ArgumentError, 'Invalid JSON payload'
+    end
+
+    def normalize_repository_reference(payload)
+      payload = payload.is_a?(Hash) ? payload : {}
+      organization = (payload['organization'] || payload['org'])&.strip
+      repository = (payload['repository'] || payload['repo'])&.strip
+      url = payload['url']&.strip
+
+      if url && (organization.nil? || organization.empty? || repository.nil? || repository.empty?)
+        org_from_url, repo_from_url = parse_repository_url(url)
+        organization ||= org_from_url
+        repository ||= repo_from_url
+      end
+
+      if organization.to_s.empty? || repository.to_s.empty?
+        raise ArgumentError, 'organization and repository are required'
+      end
+
+      { organization: organization, repository: repository.sub(/\.git\z/i, '') }
+    end
+
+    def parse_repository_url(url)
+      cleaned = url.to_s.strip
+      cleaned = cleaned.sub(/\?.*\z/, '').sub(/#.*\z/, '')
+      cleaned = cleaned.sub(/\Ahttps?:\/\//i, '')
+
+      if cleaned.start_with?('github.com/')
+        cleaned = cleaned.split('/', 2).last
+      end
+
+      parts = cleaned.split('/')
+      if parts.size < 2
+        raise ArgumentError, 'Invalid GitHub repository URL'
+      end
+
+      organization = parts[0]
+      repository = parts[1]
+
+      organization = organization.strip
+      repository = repository.strip.sub(/\.git\z/i, '')
+
+      if organization.empty? || repository.empty?
+        raise ArgumentError, 'Invalid GitHub repository URL'
+      end
+
+      [organization, repository]
     end
   end
 end

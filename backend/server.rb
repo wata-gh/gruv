@@ -11,7 +11,7 @@ module UpdateViewer
   class Server
     DEFAULT_HOST = '0.0.0.0'
     DEFAULT_PORT = 9292
-    DEFAULT_ALLOWED_METHODS = %w[GET HEAD OPTIONS]
+    DEFAULT_ALLOWED_METHODS = %w[GET HEAD POST OPTIONS]
     DEFAULT_ALLOWED_HEADERS = %w[Content-Type Authorization Accept]
 
     def initialize(app = UpdateViewer::App.freeze.app, host: ENV.fetch('HOST', DEFAULT_HOST), port: (ENV['PORT'] || DEFAULT_PORT).to_i)
