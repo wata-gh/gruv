@@ -167,8 +167,8 @@ module UpdateViewer
           s.relative_path
         FROM summaries s
         JOIN repositories r ON r.id = s.repository_id
-        WHERE lower(r.organization) = lower(?)
-          AND lower(r.name) = lower(?)
+        WHERE lower(CAST(r.organization AS VARCHAR)) = lower(CAST(? AS VARCHAR))
+          AND lower(CAST(r.name AS VARCHAR)) = lower(CAST(? AS VARCHAR))
         ORDER BY s.summary_date DESC
       SQL
 
@@ -187,8 +187,8 @@ module UpdateViewer
           s.relative_path
         FROM summaries s
         JOIN repositories r ON r.id = s.repository_id
-        WHERE lower(r.organization) = lower(?)
-          AND lower(r.name) = lower(?)
+        WHERE lower(CAST(r.organization AS VARCHAR)) = lower(CAST(? AS VARCHAR))
+          AND lower(CAST(r.name AS VARCHAR)) = lower(CAST(? AS VARCHAR))
           AND s.summary_date = ?
         LIMIT 1
       SQL
@@ -302,7 +302,36 @@ module UpdateViewer
       max_id = max_id_row ? max_id_row.fetch('max_id', 0).to_i : 0
       execute("ALTER SEQUENCE repositories_id_seq RESTART WITH #{max_id + 1}")
     rescue DuckDB::Error => e
-      raise unless e.message.match?(/unknown sequence/i)
+      if e.message.match?(/not implemented error.*alter sequence/i)
+        advance_repository_sequence_to(max_id + 1)
+      else
+        raise unless e.message.match?(/unknown sequence/i)
+      end
+    end
+
+    def advance_repository_sequence_to(target_value)
+      seq_info = query(<<~SQL).first
+        SELECT start_value, increment_by, last_value
+        FROM duckdb_sequences()
+        WHERE sequence_name = 'repositories_id_seq'
+      SQL
+      return unless seq_info
+
+      increment = seq_info.fetch('increment_by', 1).to_i
+      increment = 1 if increment.zero?
+      last_value = seq_info['last_value']
+      next_value = if last_value
+                     last_value.to_i + increment
+                   else
+                     seq_info.fetch('start_value', 1).to_i
+                   end
+
+      while next_value < target_value
+        execute("SELECT nextval('repositories_id_seq')")
+        next_value += increment
+      end
+    rescue DuckDB::Error => e
+      raise unless e.message.match?(/unknown (function|sequence)/i)
     end
 
     def query(sql, *bindings)
@@ -344,14 +373,14 @@ module UpdateViewer
       when Hash
         stringify_keys(row)
       else
-        hash_row = if row.respond_to?(:to_h)
-                     row.to_h
-                   elsif columns.empty?
-                     {}
-                   else
+        hash_row = if columns.any?
                      columns.each_with_index.each_with_object({}) do |(column, index), hash|
                        hash[column] = row[index]
                      end
+                   elsif row.respond_to?(:to_h) && !row.is_a?(Array)
+                     row.to_h
+                   else
+                     {}
                    end
 
         stringify_keys(hash_row)
