@@ -308,8 +308,60 @@ module UpdateViewer
     def query(sql, *bindings)
       result = execute(sql, *bindings)
       rows = []
-      result.each(hash: true) { |row| rows << row }
+
+      if supports_result_hash_argument?(result)
+        result.each(hash: true) { |row| rows << stringify_keys(row) }
+      else
+        columns = extract_column_names(result)
+        result.each do |row|
+          rows << coerce_row(row, columns)
+        end
+      end
+
       rows
+    end
+
+    def supports_result_hash_argument?(result)
+      result.method(:each).parameters.any? { |type, name| type == :key && name == :hash }
+    rescue NameError
+      false
+    end
+
+    def extract_column_names(result)
+      return [] unless result.respond_to?(:columns)
+
+      Array(result.columns).map do |column|
+        if column.respond_to?(:name)
+          column.name.to_s
+        else
+          column.to_s
+        end
+      end
+    end
+
+    def coerce_row(row, columns)
+      case row
+      when Hash
+        stringify_keys(row)
+      else
+        hash_row = if row.respond_to?(:to_h)
+                     row.to_h
+                   elsif columns.empty?
+                     {}
+                   else
+                     columns.each_with_index.each_with_object({}) do |(column, index), hash|
+                       hash[column] = row[index]
+                     end
+                   end
+
+        stringify_keys(hash_row)
+      end
+    end
+
+    def stringify_keys(row)
+      row.each_with_object({}) do |(key, value), hash|
+        hash[key.to_s] = value
+      end
     end
 
     def parse_date(value)
