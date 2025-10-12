@@ -1,0 +1,16 @@
+[Unit]
+Description=Gruv Frontend Next.js Service
+After=network.target
+
+[Service]
+Type=simple
+User=ec2-user
+WorkingDirectory=/home/ec2-user/ws/gruv/frontend
+ExecStart=/home/ec2-user/ws/gruv/frontend/start_server.sh --prod
+Restart=on-failure
+RestartSec=5
+Environment=NODE_ENV=production
+EnvironmentFile=/etc/gruv/gruv-frontend.env
+
+[Install]
+WantedBy=multi-user.target

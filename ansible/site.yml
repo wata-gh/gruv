@@ -1,0 +1,49 @@
+---
+- hosts: localhost
+  gather_facts: false
+  become: true
+
+  tasks:
+    - name: Ensure Next.js API base URL is provided
+      ansible.builtin.assert:
+        that:
+          - next_public_api_base_url is defined
+          - next_public_api_base_url | length > 0
+        fail_msg: "Set next_public_api_base_url via --extra-vars or inventory so the frontend can reach the backend API."
+
+    - name: Ensure gruv configuration directory exists
+      ansible.builtin.file:
+        path: /etc/gruv
+        state: directory
+        owner: root
+        group: root
+        mode: "0755"
+
+    - name: Write gruv-frontend environment configuration
+      ansible.builtin.template:
+        src: gruv-frontend.env.j2
+        dest: /etc/gruv/gruv-frontend.env
+        owner: root
+        group: root
+        mode: "0644"
+
+    - name: Install gruv systemd unit files
+      ansible.builtin.template:
+        src: "{{ item.src }}"
+        dest: "/etc/systemd/system/{{ item.dest }}"
+        owner: root
+        group: root
+        mode: "0644"
+      loop:
+        - { src: "gruv-backend.service.j2", dest: "gruv-backend.service" }
+        - { src: "gruv-frontend.service.j2", dest: "gruv-frontend.service" }
+
+    - name: Ensure gruv services are enabled and running
+      ansible.builtin.systemd:
+        name: "{{ item }}"
+        enabled: true
+        state: started
+        daemon_reload: true
+      loop:
+        - gruv-backend.service
+        - gruv-frontend.service
