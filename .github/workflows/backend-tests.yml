@@ -1,0 +1,22 @@
+name: Backend Tests
+
+on:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Ruby
+        uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: '3.2'
+
+      - name: Run backend tests
+        run: |
+          ruby -Ibackend/test -e 'Dir["backend/test/**/*_test.rb"].sort.each { |f| require File.expand_path(f) }'
