@@ -5,22 +5,20 @@ require 'optparse'
 require 'date'
 require 'pathname'
 
-ENV['BUNDLE_GEMFILE'] ||= File.expand_path('../backend/Gemfile', __dir__)
-require 'bundler/setup'
-
-require_relative '../backend/app'
-
 module UpdateViewer
   module Scripts
     class MarkdownMigrator
       DEFAULT_ROOT = File.expand_path('..', __dir__).freeze
+      DEFAULT_DATABASE_PATH = File.expand_path('../backend/data/update_viewer.duckdb', __dir__).freeze
+      FILENAME_PATTERN = /\A(?<organization>.+?)_(?<repository>.+)_(?<date>\d{4}-\d{2}-\d{2})\.md\z/.freeze
+
+      class MissingDependenciesError < StandardError; end
 
       def initialize(root:, database_path:, dry_run: false, verbose: true)
         @root = root
         @database_path = database_path
         @dry_run = dry_run
         @verbose = verbose
-        @database = UpdateViewer::Database.new(path: database_path)
       end
 
       def run
@@ -29,6 +27,8 @@ module UpdateViewer
           log('No markdown files matching the expected pattern were found. Nothing to migrate.')
           return
         end
+
+        ensure_backend_loaded unless dry_run?
 
         migrated = 0
         skipped = []
@@ -61,11 +61,14 @@ module UpdateViewer
           log("Skipped files (#{skipped.size}):")
           skipped.each { |path| log("  - #{relative_to_root(path)}") }
         end
+      rescue MissingDependenciesError => e
+        warn(e.message)
+        exit(1)
       end
 
       private
 
-      attr_reader :root, :database_path, :database, :dry_run, :verbose
+      attr_reader :root, :database_path, :dry_run, :verbose
 
       def dry_run?
         dry_run
@@ -78,11 +81,11 @@ module UpdateViewer
       end
 
       def filename_matches?(filename)
-        !!UpdateViewer::Catalog::FILENAME_PATTERN.match(filename)
+        !!FILENAME_PATTERN.match(filename)
       end
 
       def build_record(path)
-        match = UpdateViewer::Catalog::FILENAME_PATTERN.match(File.basename(path))
+        match = FILENAME_PATTERN.match(File.basename(path))
         return unless match
 
         date = Date.parse(match[:date])
@@ -112,12 +115,48 @@ module UpdateViewer
       def record_description(record)
         "#{record[:organization]}/#{record[:repository]} @ #{record[:date]} (#{record[:relative_path]})"
       end
+
+      def database
+        @database ||= begin
+          ensure_backend_loaded
+          UpdateViewer::Database.new(path: database_path)
+        end
+      end
+
+      def ensure_backend_loaded
+        return if @backend_loaded
+
+        require_backend
+        @backend_loaded = true
+      rescue LoadError => e
+        raise MissingDependenciesError, "Failed to load backend dependencies: #{e.message}"
+      end
+
+      def require_backend
+        require_relative '../backend/app'
+      rescue LoadError
+        setup_bundler_and_require
+      end
+
+      def setup_bundler_and_require
+        ENV['BUNDLE_GEMFILE'] ||= File.expand_path('../backend/Gemfile', __dir__)
+        require 'bundler'
+        Bundler.ui = Bundler::UI::Silent.new if defined?(Bundler::UI::Silent)
+        Bundler.setup
+        require_relative '../backend/app'
+      rescue Bundler::GemNotFound => e
+        raise MissingDependenciesError, <<~MESSAGE.strip
+          Missing gems for the backend: #{e.message}. Run `bundle install --gemfile backend/Gemfile` before executing the migration.
+        MESSAGE
+      rescue SystemExit
+        raise MissingDependenciesError, 'Missing gems for the backend. Run `bundle install --gemfile backend/Gemfile` before executing the migration.'
+      end
     end
 
     def self.parse_arguments(argv)
       options = {
         root: MarkdownMigrator::DEFAULT_ROOT,
-        database_path: UpdateViewer::Database::DEFAULT_DB_PATH,
+        database_path: MarkdownMigrator::DEFAULT_DATABASE_PATH,
         dry_run: false,
         verbose: true
       }
