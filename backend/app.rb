@@ -172,9 +172,10 @@ module UpdateViewer
         ORDER BY s.summary_date DESC
       SQL
 
-      query(sql, organization, repository).map do |row|
-        summary_record(row)
-      end
+      query(sql, organization, repository)
+        .map { |row| summary_record(row) }
+        .sort_by { |record| record[:date] || Date.new }
+        .reverse
     end
 
     def find_summary(organization, repository, date)
