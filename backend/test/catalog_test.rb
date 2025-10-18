@@ -52,6 +52,23 @@ module UpdateViewer
       end
     end
 
+    def test_markdown_with_invalid_encoding_is_sanitized
+      filename = "acme_widgets_2024-04-01.md"
+      invalid_content = "# Summary\nBinary: \xC3\x28"
+      File.binwrite(File.join(@tmpdir, filename), invalid_content)
+
+      catalog = Catalog.new(root: @tmpdir, database: @database)
+      entry = catalog.latest_entry("acme", "widgets")
+
+      markdown = catalog.markdown_for(entry)
+      assert_equal Encoding::UTF_8, markdown.encoding
+      assert markdown.valid_encoding?, "Expected markdown to be valid UTF-8"
+
+      html = catalog.html_for(entry)
+      assert_equal Encoding::UTF_8, html.encoding
+      assert html.valid_encoding?, "Expected HTML to be valid UTF-8"
+    end
+
     private
 
     def write_markdown(filename, contents)

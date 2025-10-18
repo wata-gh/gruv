@@ -451,11 +451,11 @@ module UpdateViewer
     end
 
     def markdown_for(entry)
-      File.read(entry.path)
+      sanitize_string(File.binread(entry.path))
     end
 
     def html_for(entry)
-      markdown_renderer.render(markdown_for(entry))
+      sanitize_string(markdown_renderer.render(markdown_for(entry)))
     end
 
     def register_summary_from_path(path)
@@ -543,6 +543,17 @@ module UpdateViewer
           footnotes: true
         )
       end
+    end
+
+    def sanitize_string(value)
+      string = value.to_s.dup
+      return string if string.encoding == Encoding::UTF_8 && string.valid_encoding?
+
+      string.force_encoding(Encoding::BINARY) unless string.valid_encoding?
+      string.encode(Encoding::UTF_8, invalid: :replace, undef: :replace, replace: '')
+    rescue EncodingError
+      string.force_encoding(Encoding::BINARY)
+      string.encode(Encoding::UTF_8, invalid: :replace, undef: :replace, replace: '')
     end
   end
 
