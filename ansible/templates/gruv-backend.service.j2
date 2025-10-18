@@ -6,6 +6,7 @@ After=network.target
 Type=simple
 User=ec2-user
 WorkingDirectory=/home/ec2-user/ws/gruv/backend
+EnvironmentFile=/etc/gruv/gruv-backend.env
 ExecStart=/home/ec2-user/ws/gruv/backend/start_server.sh
 Restart=on-failure
 RestartSec=5
