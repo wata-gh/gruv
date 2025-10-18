@@ -550,7 +550,10 @@ module UpdateViewer
       string = value.to_s.dup
       return string if string.encoding == Encoding::UTF_8 && string.valid_encoding?
 
-      string.force_encoding(Encoding::BINARY) unless string.valid_encoding?
+      string.force_encoding(Encoding::UTF_8)
+      return string if string.valid_encoding?
+
+      string.force_encoding(Encoding::BINARY)
       string.encode(Encoding::UTF_8, invalid: :replace, undef: :replace, replace: '')
     rescue EncodingError
       string.force_encoding(Encoding::BINARY)
