@@ -41,3 +41,6 @@ node_modules/
 
 # Execution logs
 logs/
+!backend/logs/
+backend/logs/*
+!backend/logs/.gitkeep

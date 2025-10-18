@@ -546,6 +546,107 @@ module UpdateViewer
     end
   end
 
+  class LogRegistry
+    DEFAULT_ROOT = File.expand_path('../logs', __dir__).freeze
+    MAX_CHUNK_BYTES = 32_768
+
+    attr_reader :root
+
+    def initialize(root: ENV.fetch('LOGS_ROOT', DEFAULT_ROOT))
+      @root = File.expand_path(root)
+    end
+
+    def list
+      return [] unless Dir.exist?(root)
+
+      Dir.children(root)
+        .sort
+        .filter_map do |entry|
+          path = File.join(root, entry)
+          next unless File.file?(path)
+
+          build_metadata(entry, path)
+        end
+    end
+
+    def stream(identifier, cursor: nil, limit: MAX_CHUNK_BYTES)
+      path = resolve_path(identifier)
+      raise NotFound, 'Log file not found' unless File.file?(path)
+
+      size = File.size(path)
+      mtime = File.mtime(path).utc.iso8601
+
+      normalized_limit = limit.to_i.positive? ? [limit.to_i, MAX_CHUNK_BYTES].min : MAX_CHUNK_BYTES
+
+      effective_cursor = normalize_cursor(cursor, size)
+      reset = effective_cursor.nil?
+
+      start_offset = if effective_cursor.nil?
+                       [size - normalized_limit, 0].max
+                     else
+                       effective_cursor
+                     end
+
+      chunk = read_from(path, start_offset)
+
+      {
+        id: identifier,
+        name: File.basename(path),
+        content: chunk,
+        cursor: size,
+        size: size,
+        mtime: mtime,
+        reset: reset
+      }
+    end
+
+    private
+
+    def build_metadata(identifier, path)
+      {
+        id: identifier,
+        name: File.basename(path),
+        size: File.size(path),
+        mtime: File.mtime(path).utc.iso8601
+      }
+    end
+
+    def resolve_path(identifier)
+      sanitized = identifier.to_s.strip
+      raise NotFound, 'Log file not found' if sanitized.empty?
+
+      candidate = File.expand_path(sanitized, root)
+      base_root = File.expand_path(root)
+
+      unless candidate.start_with?("#{base_root}/") || candidate == base_root
+        raise NotFound, 'Log file not found'
+      end
+
+      candidate
+    end
+
+    def normalize_cursor(cursor, size)
+      return nil if cursor.nil?
+
+      coerced = cursor.to_i
+      return nil if coerced.negative?
+      return nil if coerced > size
+
+      coerced
+    end
+
+    def read_from(path, offset)
+      File.open(path, 'rb') do |file|
+        file.seek(offset, IO::SEEK_SET)
+        data = file.read.to_s
+        data.force_encoding('UTF-8')
+        data.valid_encoding? ? data : data.encode('UTF-8', invalid: :replace, undef: :replace, replace: '�')
+      end
+    rescue Errno::ENOENT
+      raise NotFound, 'Log file not found'
+    end
+  end
+
   class App < Roda
     plugin :all_verbs
     plugin :json, classes: [Array, Hash]
@@ -569,6 +670,7 @@ module UpdateViewer
     def initialize(*args)
       super
       @catalog = Catalog.new
+      @log_registry = LogRegistry.new
     end
 
     route do |r|
@@ -580,7 +682,9 @@ module UpdateViewer
             '/repos',
             '/repos/:organization/:repository/latest',
             '/repos/:organization/:repository/history',
-            '/repos/:organization/:repository/:date'
+            '/repos/:organization/:repository/:date',
+            '/logs',
+            '/logs/:identifier'
           ]
         }
       end
@@ -670,11 +774,27 @@ module UpdateViewer
           end
         end
       end
+
+      r.on 'logs' do
+        r.get true do
+          { logs: log_registry.list }
+        end
+
+        r.on String do |identifier|
+          r.get true do
+            cursor = parse_optional_integer(r.params['cursor'])
+            limit = parse_optional_integer(r.params['limit'])
+
+            result = log_registry.stream(identifier, cursor: cursor, limit: limit || LogRegistry::MAX_CHUNK_BYTES)
+            result
+          end
+        end
+      end
     end
 
     private
 
-    attr_reader :catalog
+    attr_reader :catalog, :log_registry
 
     def serialize_entry(entry)
       {
@@ -753,6 +873,14 @@ module UpdateViewer
       return text if text.length <= limit
 
       "#{text[0, limit]}...(truncated)"
+    end
+
+    def parse_optional_integer(value)
+      return nil if value.nil?
+
+      Integer(value)
+    rescue ArgumentError, TypeError
+      nil
     end
   end
 end
