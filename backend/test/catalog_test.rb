@@ -69,6 +69,22 @@ module UpdateViewer
       assert html.valid_encoding?, "Expected HTML to be valid UTF-8"
     end
 
+    def test_markdown_preserves_utf8_characters
+      filename = "acme_widgets_2024-04-02.md"
+      contents = "# 最新の更新\nこんにちは、世界！"
+      write_markdown(filename, contents)
+
+      catalog = Catalog.new(root: @tmpdir, database: @database)
+      entry = catalog.latest_entry("acme", "widgets")
+
+      markdown = catalog.markdown_for(entry)
+      assert_equal contents, markdown
+
+      html = catalog.html_for(entry)
+      assert_includes html, "最新の更新"
+      assert_includes html, "こんにちは、世界！"
+    end
+
     private
 
     def write_markdown(filename, contents)
