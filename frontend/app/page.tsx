@@ -3,7 +3,7 @@
 import * as React from 'react';
 import useSWR from 'swr';
 
-import { Loader2, Plus, RefreshCcw } from 'lucide-react';
+import { FileText, Loader2, Plus, RefreshCcw, Settings } from 'lucide-react';
 
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
@@ -68,6 +68,29 @@ interface GenerateSummaryResponse {
   stderr?: string;
 }
 
+interface LogFileDescriptor {
+  id: string;
+  name: string;
+  size: number;
+  mtime: string;
+}
+
+interface LogsResponse {
+  logs: LogFileDescriptor[];
+}
+
+interface LogStreamResponse {
+  id: string;
+  name: string;
+  content: string;
+  cursor: number;
+  size: number;
+  mtime: string;
+  reset: boolean;
+}
+
+type ViewMode = 'summaries' | 'logs';
+
 const fetcher = async (url: string) => {
   const response = await fetch(url);
   if (!response.ok) {
@@ -90,6 +113,44 @@ function formatDateLabel(date: string) {
   } catch (error) {
     return date;
   }
+}
+
+function formatFileSize(bytes: number) {
+  if (!Number.isFinite(bytes) || bytes < 0) {
+    return '0 B';
+  }
+
+  const units = ['B', 'KB', 'MB', 'GB', 'TB'];
+  let value = bytes;
+  let unitIndex = 0;
+
+  while (value >= 1024 && unitIndex < units.length - 1) {
+    value /= 1024;
+    unitIndex += 1;
+  }
+
+  const display = unitIndex === 0 ? Math.round(value).toString() : value.toFixed(1);
+  return `${display} ${units[unitIndex]}`;
+}
+
+function formatDateTime(timestamp: string | null | undefined) {
+  if (!timestamp) {
+    return '—';
+  }
+
+  try {
+    return new Date(timestamp).toLocaleString();
+  } catch (error) {
+    return timestamp;
+  }
+}
+
+function formatLastUpdated(date: Date | null) {
+  if (!date) {
+    return 'Last refreshed: never';
+  }
+
+  return `Last refreshed: ${date.toLocaleString()}`;
 }
 
 function useRepositorySelection(repositories?: RepositorySummary[]) {
@@ -127,7 +188,222 @@ function MarkdownRenderer({ html, markdown }: { html?: string; markdown: string 
   return <div className="whitespace-pre-wrap">{markdown}</div>;
 }
 
+const LOG_STREAM_POLL_INTERVAL = 5000;
+
+function useLogStream(logId: string | null, { enabled }: { enabled: boolean }) {
+  const [content, setContent] = React.useState('');
+  const [isFetching, setIsFetching] = React.useState(false);
+  const [error, setError] = React.useState<Error | null>(null);
+  const [lastUpdatedAt, setLastUpdatedAt] = React.useState<Date | null>(null);
+  const cursorRef = React.useRef<number | null>(null);
+  const mountedRef = React.useRef(true);
+
+  React.useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+    };
+  }, []);
+
+  React.useEffect(() => {
+    cursorRef.current = null;
+    setContent('');
+    setError(null);
+    setLastUpdatedAt(null);
+  }, [logId]);
+
+  const fetchChunk = React.useCallback(
+    async ({ reset = false }: { reset?: boolean } = {}) => {
+      if (!logId) {
+        return;
+      }
+
+      if (reset) {
+        cursorRef.current = null;
+      }
+
+      const params = new URLSearchParams();
+      const currentCursor = cursorRef.current;
+
+      if (currentCursor !== null && !reset) {
+        params.set('cursor', String(currentCursor));
+      }
+
+      const query = params.toString();
+      const url = `${API_BASE_URL}/logs/${encodeURIComponent(logId)}${query ? `?${query}` : ''}`;
+
+      try {
+        setIsFetching(true);
+        const response = await fetch(url);
+        if (!response.ok) {
+          throw new Error(`Failed to fetch log (${response.status})`);
+        }
+
+        const payload: LogStreamResponse = await response.json();
+
+        if (!mountedRef.current) {
+          return;
+        }
+
+        const chunk = payload.content ?? '';
+        const shouldReset = reset || payload.reset;
+
+        if (shouldReset) {
+          setContent(chunk);
+        } else if (chunk) {
+          setContent((previous) => `${previous}${chunk}`);
+        }
+
+        const nextCursor =
+          typeof payload.cursor === 'number' && Number.isFinite(payload.cursor)
+            ? payload.cursor
+            : typeof payload.size === 'number' && Number.isFinite(payload.size)
+              ? payload.size
+              : cursorRef.current;
+
+        if (typeof nextCursor === 'number' && Number.isFinite(nextCursor)) {
+          cursorRef.current = nextCursor;
+        }
+
+        let refreshedAt = new Date();
+        if (typeof payload.mtime === 'string') {
+          const parsed = new Date(payload.mtime);
+          if (!Number.isNaN(parsed.getTime())) {
+            refreshedAt = parsed;
+          }
+        }
+
+        setLastUpdatedAt(refreshedAt);
+        setError(null);
+      } catch (fetchError) {
+        if (!mountedRef.current) {
+          return;
+        }
+        setError(fetchError instanceof Error ? fetchError : new Error('Failed to fetch log'));
+      } finally {
+        if (mountedRef.current) {
+          setIsFetching(false);
+        }
+      }
+    },
+    [logId]
+  );
+
+  React.useEffect(() => {
+    if (!enabled || !logId) {
+      return;
+    }
+
+    fetchChunk({ reset: true }).catch(() => {
+      /* handled in hook */
+    });
+
+    const interval = window.setInterval(() => {
+      fetchChunk().catch(() => {
+        /* handled in hook */
+      });
+    }, LOG_STREAM_POLL_INTERVAL);
+
+    return () => {
+      window.clearInterval(interval);
+    };
+  }, [enabled, fetchChunk, logId]);
+
+  const reload = React.useCallback(() => fetchChunk({ reset: true }), [fetchChunk]);
+
+  return {
+    content,
+    isFetching,
+    error,
+    reload,
+    lastUpdatedAt,
+    hasContent: content.length > 0
+  } as const;
+}
+
+function SettingsMenu({ activeView, onSelectView }: { activeView: ViewMode; onSelectView: (view: ViewMode) => void }) {
+  const [open, setOpen] = React.useState(false);
+  const containerRef = React.useRef<HTMLDivElement | null>(null);
+
+  React.useEffect(() => {
+    if (!open) {
+      return;
+    }
+
+    function handleClick(event: MouseEvent) {
+      if (containerRef.current && !containerRef.current.contains(event.target as Node)) {
+        setOpen(false);
+      }
+    }
+
+    function handleKey(event: KeyboardEvent) {
+      if (event.key === 'Escape') {
+        setOpen(false);
+      }
+    }
+
+    document.addEventListener('mousedown', handleClick);
+    document.addEventListener('keydown', handleKey);
+
+    return () => {
+      document.removeEventListener('mousedown', handleClick);
+      document.removeEventListener('keydown', handleKey);
+    };
+  }, [open]);
+
+  const handleSelect = React.useCallback(
+    (view: ViewMode) => {
+      onSelectView(view);
+      setOpen(false);
+    },
+    [onSelectView]
+  );
+
+  const menuItems: { view: ViewMode; label: string; description: string }[] = [
+    { view: 'summaries', label: 'Repository Viewer', description: 'Browse repository summaries' },
+    { view: 'logs', label: 'View Logs', description: 'Monitor server log files' }
+  ];
+
+  return (
+    <div className="relative" ref={containerRef}>
+      <Button
+        type="button"
+        variant="ghost"
+        size="icon"
+        aria-haspopup="menu"
+        aria-expanded={open}
+        aria-label="Open settings menu"
+        onClick={() => setOpen((previous) => !previous)}
+      >
+        <Settings className="h-4 w-4" aria-hidden="true" />
+      </Button>
+      {open && (
+        <div className="absolute right-0 z-20 mt-2 w-64 rounded-md border bg-popover p-1 text-popover-foreground shadow-lg">
+          {menuItems.map((item) => {
+            const isActive = item.view === activeView;
+            return (
+              <button
+                key={item.view}
+                type="button"
+                className={cn(
+                  'flex w-full flex-col rounded-md px-3 py-2 text-left text-sm transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring',
+                  isActive ? 'bg-accent text-accent-foreground' : 'hover:bg-accent hover:text-accent-foreground'
+                )}
+                onClick={() => handleSelect(item.view)}
+              >
+                <span className="font-medium">{item.label}</span>
+                <span className="text-xs text-muted-foreground">{item.description}</span>
+              </button>
+            );
+          })}
+        </div>
+      )}
+    </div>
+  );
+}
+
 export default function HomePage() {
+  const [activeView, setActiveView] = React.useState<ViewMode>('summaries');
   const {
     data: repositoriesData,
     error: repositoriesError,
@@ -135,14 +411,27 @@ export default function HomePage() {
     mutate: mutateRepositories
   } = useSWR<RepositoriesResponse>(`${API_BASE_URL}/repos`, fetcher, { refreshInterval: 60_000 });
 
+  const {
+    data: logsData,
+    error: logsError,
+    isLoading: logsLoading,
+    mutate: mutateLogs
+  } = useSWR<LogsResponse>(activeView === 'logs' ? `${API_BASE_URL}/logs` : null, fetcher, {
+    refreshInterval: 60_000,
+    revalidateOnFocus: false
+  });
+
   const repositories = repositoriesData?.repositories ?? [];
   const { selectedRepo, selectRepo, selectById } = useRepositorySelection(repositories);
+
+  const logs = logsData?.logs ?? [];
 
   const [selectedDate, setSelectedDate] = React.useState<string | null>(null);
   const [showCreateForm, setShowCreateForm] = React.useState(false);
   const [newRepoUrl, setNewRepoUrl] = React.useState('');
   const [isCreating, setIsCreating] = React.useState(false);
   const [updatingRepoId, setUpdatingRepoId] = React.useState<string | null>(null);
+  const [selectedLogId, setSelectedLogId] = React.useState<string | null>(null);
   const [statusMessage, setStatusMessage] = React.useState<{ type: 'success' | 'error'; text: string } | null>(null);
 
   const selectedRepoId = React.useMemo(() => {
@@ -162,12 +451,37 @@ export default function HomePage() {
     return () => window.clearTimeout(timer);
   }, [statusMessage]);
 
+  React.useEffect(() => {
+    if (activeView !== 'logs') {
+      return;
+    }
+
+    if (!logs.length) {
+      setSelectedLogId(null);
+      return;
+    }
+
+    setSelectedLogId((current) => {
+      if (current && logs.some((log) => log.id === current)) {
+        return current;
+      }
+      return logs[0].id;
+    });
+  }, [activeView, logs]);
+
   const repoHistoryKey = React.useMemo(() => {
     if (!selectedRepo) {
       return null;
     }
     return `${API_BASE_URL}/repos/${encodeURIComponent(selectedRepo.organization)}/${encodeURIComponent(selectedRepo.repository)}/history`;
   }, [selectedRepo]);
+
+  const selectedLog = React.useMemo(() => {
+    if (!selectedLogId) {
+      return null;
+    }
+    return logs.find((log) => log.id === selectedLogId) ?? null;
+  }, [logs, selectedLogId]);
 
   const {
     data: historyData,
@@ -200,6 +514,15 @@ export default function HomePage() {
   } = useSWR<SummaryResponse>(summaryKey, fetcher, {
     revalidateOnFocus: false
   });
+
+  const {
+    content: logContent,
+    isFetching: isLogFetching,
+    error: logError,
+    reload: reloadLog,
+    lastUpdatedAt: logLastUpdatedAt,
+    hasContent: logHasContent
+  } = useLogStream(selectedLogId, { enabled: activeView === 'logs' });
 
   const triggerGeneration = React.useCallback(async (payload: Record<string, string>): Promise<GenerateSummaryResponse> => {
     const response = await fetch(`${API_BASE_URL}/repos/generate`, {
@@ -290,15 +613,19 @@ export default function HomePage() {
           <h1 className="text-2xl font-semibold tracking-tight">GitHub Repository Update Viewer</h1>
           <p className="text-sm text-muted-foreground">Browse curated Markdown summaries across your favorite repositories.</p>
         </div>
-        <ThemeToggle />
+        <div className="flex items-center gap-2">
+          <ThemeToggle />
+          <SettingsMenu activeView={activeView} onSelectView={setActiveView} />
+        </div>
       </header>
 
-      <div className="flex flex-1 flex-col gap-6 px-8 pb-8 pt-6 lg:flex-row">
-        <Card className="w-full flex-none lg:w-72">
-          <CardHeader>
-            <CardTitle className="text-lg">Repositories</CardTitle>
-            <CardDescription>Select a repository to explore summaries.</CardDescription>
-          </CardHeader>
+      {activeView === 'summaries' ? (
+        <div className="flex flex-1 flex-col gap-6 px-8 pb-8 pt-6 lg:flex-row">
+          <Card className="w-full flex-none lg:w-72">
+            <CardHeader>
+              <CardTitle className="text-lg">Repositories</CardTitle>
+              <CardDescription>Select a repository to explore summaries.</CardDescription>
+            </CardHeader>
           <CardContent className="flex flex-col gap-4 pt-2">
             {repositoriesLoading && <Skeleton className="h-10 w-full" />}
             {repositoriesError && <p className="text-sm text-destructive">Failed to load repositories. Please try again.</p>}
@@ -468,7 +795,121 @@ export default function HomePage() {
             </ScrollArea>
           </CardContent>
         </Card>
-      </div>
+        </div>
+      ) : (
+        <div className="flex flex-1 flex-col gap-6 px-8 pb-8 pt-6 lg:flex-row">
+          <Card className="w-full flex-none lg:w-72">
+            <CardHeader>
+              <CardTitle className="text-lg">Log Files</CardTitle>
+              <CardDescription>Select a log to monitor streaming updates.</CardDescription>
+            </CardHeader>
+            <CardContent className="flex flex-col gap-4 pt-2">
+              {logsLoading && <Skeleton className="h-10 w-full" />}
+              {logsError && <p className="text-sm text-destructive">Failed to load log files. Please try again.</p>}
+
+              <div className="flex items-center justify-between">
+                <span className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">Logs</span>
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="icon"
+                  aria-label="Refresh log list"
+                  disabled={logsLoading}
+                  onClick={() => mutateLogs?.(undefined, { revalidate: true })}
+                >
+                  {logsLoading ? (
+                    <Loader2 className="h-4 w-4 animate-spin" aria-hidden="true" />
+                  ) : (
+                    <RefreshCcw className="h-4 w-4" aria-hidden="true" />
+                  )}
+                </Button>
+              </div>
+
+              <ScrollArea className="h-[60vh]">
+                <div className="flex flex-col gap-2">
+                  {logs.map((log) => {
+                    const isActive = selectedLogId === log.id;
+                    return (
+                      <button
+                        key={log.id}
+                        type="button"
+                        className={cn(
+                          'flex w-full items-start gap-2 rounded-md border px-3 py-2 text-left transition hover:border-accent hover:bg-accent',
+                          isActive ? 'border-primary bg-primary/10 text-primary-foreground dark:bg-primary/20' : 'border-border'
+                        )}
+                        onClick={() => setSelectedLogId(log.id)}
+                      >
+                        <FileText className="mt-0.5 h-4 w-4 flex-none text-muted-foreground" aria-hidden="true" />
+                        <div className="flex flex-1 flex-col">
+                          <span className="text-sm font-medium">{log.name}</span>
+                          <span className="text-xs text-muted-foreground">
+                            {formatFileSize(log.size)} • Updated {formatDateTime(log.mtime)}
+                          </span>
+                        </div>
+                      </button>
+                    );
+                  })}
+
+                  {!logsLoading && !logsError && logs.length === 0 && (
+                    <p className="text-sm text-muted-foreground">No log files were found. Add logs to the server to monitor activity.</p>
+                  )}
+                </div>
+              </ScrollArea>
+            </CardContent>
+          </Card>
+
+          <Card className="flex-1">
+            <CardHeader className="flex flex-row items-start justify-between space-y-0">
+              <div>
+                <CardTitle className="text-lg">{selectedLog ? selectedLog.name : 'Select a log file'}</CardTitle>
+                <CardDescription>
+                  {selectedLog
+                    ? `${formatFileSize(selectedLog.size)} • Modified ${formatDateTime(selectedLog.mtime)}`
+                    : 'Choose a log to begin streaming output.'}
+                </CardDescription>
+              </div>
+              <div className="flex items-center gap-2">
+                <span className="text-xs text-muted-foreground">{formatLastUpdated(logLastUpdatedAt)}</span>
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="icon"
+                  disabled={!selectedLogId || isLogFetching}
+                  aria-label="Reload log contents"
+                  onClick={() => {
+                    reloadLog();
+                    mutateLogs?.(undefined, { revalidate: true });
+                  }}
+                >
+                  {isLogFetching ? <Loader2 className="h-4 w-4 animate-spin" aria-hidden="true" /> : <RefreshCcw className="h-4 w-4" aria-hidden="true" />}
+                </Button>
+              </div>
+            </CardHeader>
+            <CardContent className="pt-0">
+              {logError && (
+                <p className="mb-3 rounded-md border border-destructive/40 bg-destructive/10 px-3 py-2 text-sm text-destructive">
+                  {logError.message}
+                </p>
+              )}
+              <div className="rounded-md border bg-muted/10">
+                <ScrollArea className="h-[60vh]" viewportClassName="pr-3">
+                  <pre className="whitespace-pre-wrap px-4 py-3 font-mono text-sm leading-relaxed">
+                    {logContent}
+                    {!logError && !logHasContent && !isLogFetching && (
+                      <span className="text-muted-foreground">
+                        {selectedLogId ? 'Log output will appear here once data is available.' : 'Select a log file to begin monitoring output.'}
+                      </span>
+                    )}
+                    {isLogFetching && !logHasContent && (
+                      <span className="text-muted-foreground">Loading log data…</span>
+                    )}
+                  </pre>
+                </ScrollArea>
+              </div>
+            </CardContent>
+          </Card>
+        </div>
+      )}
     </main>
   );
 }

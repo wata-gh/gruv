@@ -46,6 +46,14 @@
         group: root
         mode: "0755"
 
+    - name: Write gruv-backend environment configuration
+      ansible.builtin.template:
+        src: gruv-backend.env.j2
+        dest: /etc/gruv/gruv-backend.env
+        owner: root
+        group: root
+        mode: "0644"
+
     - name: Write gruv-frontend environment configuration
       ansible.builtin.template:
         src: gruv-frontend.env.j2
