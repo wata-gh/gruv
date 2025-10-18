@@ -580,6 +580,9 @@ module UpdateViewer
       @generator_factory = generator_factory || method(:build_generator)
       @queue = ::Queue.new
       @shutdown = false
+      @state_mutex = Mutex.new
+      @pending_jobs = []
+      @active_job = nil
       @worker = Thread.new { work_loop }
       @worker.name = 'repository-update-worker' if @worker.respond_to?(:name=)
     end
@@ -589,6 +592,7 @@ module UpdateViewer
 
       result_queue = ::Queue.new
       job = Job.new(organization: organization, repository: repository, result_queue: result_queue)
+      track_enqueue(job)
       queue << job
       result_queue.pop
     end
@@ -599,15 +603,29 @@ module UpdateViewer
       @shutdown = true
       queue << SHUTDOWN_SENTINEL
       worker.join
+      state_mutex.synchronize do
+        pending_jobs.clear
+        @active_job = nil
+      end
     end
 
     def shutdown?
       @shutdown == true
     end
 
+    def status
+      state_mutex.synchronize do
+        {
+          size: pending_jobs.length,
+          active_job: active_job && serialize_active_job(active_job),
+          jobs: pending_jobs.map { |entry| serialize_pending_job(entry) }
+        }
+      end
+    end
+
     private
 
-    attr_reader :catalog, :logger, :generator_factory, :queue, :worker
+    attr_reader :catalog, :logger, :generator_factory, :queue, :worker, :state_mutex, :pending_jobs, :active_job
 
     def ensure_running!
       raise ShutdownError, 'Update queue has been shut down' if shutdown?
@@ -618,8 +636,11 @@ module UpdateViewer
 
     def work_loop
       loop do
+        job = nil
         job = queue.pop
         break if job.equal?(SHUTDOWN_SENTINEL)
+
+        mark_job_started(job)
 
         result = process_job(job)
         deliver_result(job, result)
@@ -627,6 +648,8 @@ module UpdateViewer
         logger.error("[queue] Fatal error while processing #{job.organization}/#{job.repository}: #{e.class}: #{e.message}")
         fallback = Result.new(status: :unexpected_error, error: e, organization: job.organization, repository: job.repository)
         deliver_result(job, fallback)
+      ensure
+        clear_active_job(job)
       end
     end
 
@@ -702,6 +725,45 @@ module UpdateViewer
 
     def build_generator(organization, repository)
       SummaryGenerator.new(organization, repository)
+    end
+
+    def track_enqueue(job)
+      state_mutex.synchronize do
+        pending_jobs << { job: job, enqueued_at: Time.now.utc }
+      end
+    end
+
+    def mark_job_started(job)
+      state_mutex.synchronize do
+        entry_index = pending_jobs.index { |entry| entry[:job].equal?(job) }
+        enqueued_at = entry_index ? pending_jobs.delete_at(entry_index)[:enqueued_at] : nil
+        @active_job = { job: job, started_at: Time.now.utc, enqueued_at: enqueued_at }
+      end
+    end
+
+    def clear_active_job(job)
+      return if job.nil? || job.equal?(SHUTDOWN_SENTINEL)
+
+      state_mutex.synchronize do
+        @active_job = nil if active_job && active_job[:job].equal?(job)
+      end
+    end
+
+    def serialize_pending_job(entry)
+      {
+        organization: entry[:job].organization,
+        repository: entry[:job].repository,
+        enqueued_at: entry[:enqueued_at]&.iso8601
+      }
+    end
+
+    def serialize_active_job(entry)
+      {
+        organization: entry[:job].organization,
+        repository: entry[:job].repository,
+        enqueued_at: entry[:enqueued_at]&.iso8601,
+        started_at: entry[:started_at]&.iso8601
+      }
     end
   end
 
@@ -843,6 +905,7 @@ module UpdateViewer
             '/repos/:organization/:repository/latest',
             '/repos/:organization/:repository/history',
             '/repos/:organization/:repository/:date',
+            '/queue',
             '/logs',
             '/logs/:identifier'
           ]
@@ -920,6 +983,10 @@ module UpdateViewer
             result
           end
         end
+      end
+
+      r.get 'queue' do
+        repository_update_queue.status
       end
     end
 

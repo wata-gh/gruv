@@ -3,7 +3,7 @@
 import * as React from 'react';
 import useSWR from 'swr';
 
-import { FileText, Loader2, Plus, RefreshCcw, Settings } from 'lucide-react';
+import { FileText, ListTodo, Loader2, Plus, RefreshCcw, Settings } from 'lucide-react';
 
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
@@ -90,6 +90,19 @@ interface LogStreamResponse {
 }
 
 type ViewMode = 'summaries' | 'logs';
+
+interface QueueJobDescriptor {
+  organization: string;
+  repository: string;
+  enqueued_at?: string;
+  started_at?: string;
+}
+
+interface QueueStatusResponse {
+  size: number;
+  active_job: QueueJobDescriptor | null;
+  jobs: QueueJobDescriptor[];
+}
 
 const fetcher = async (url: string) => {
   const response = await fetch(url);
@@ -402,6 +415,153 @@ function SettingsMenu({ activeView, onSelectView }: { activeView: ViewMode; onSe
   );
 }
 
+function QueueStatusMenu({
+  status,
+  isLoading,
+  error
+}: {
+  status: QueueStatusResponse | undefined;
+  isLoading: boolean;
+  error: unknown;
+}) {
+  const [open, setOpen] = React.useState(false);
+  const containerRef = React.useRef<HTMLDivElement | null>(null);
+
+  React.useEffect(() => {
+    if (!open) {
+      return;
+    }
+
+    function handleClick(event: MouseEvent) {
+      if (containerRef.current && !containerRef.current.contains(event.target as Node)) {
+        setOpen(false);
+      }
+    }
+
+    function handleKey(event: KeyboardEvent) {
+      if (event.key === 'Escape') {
+        setOpen(false);
+      }
+    }
+
+    document.addEventListener('mousedown', handleClick);
+    document.addEventListener('keydown', handleKey);
+
+    return () => {
+      document.removeEventListener('mousedown', handleClick);
+      document.removeEventListener('keydown', handleKey);
+    };
+  }, [open]);
+
+  const queuedJobs = status?.jobs ?? [];
+  const activeJob = status?.active_job ?? null;
+  const queuedCount = typeof status?.size === 'number' ? status.size : queuedJobs.length;
+  const displayCount = queuedCount;
+  const hasError = Boolean(error);
+
+  const isInitialLoading = isLoading && !status && !hasError;
+
+  const ariaLabel = React.useMemo(() => {
+    if (isInitialLoading) {
+      return 'Queue status is loading';
+    }
+    if (hasError) {
+      return 'Queue status is unavailable';
+    }
+    if (displayCount === 1) {
+      return 'There is 1 job in the update queue';
+    }
+    return `There are ${displayCount} jobs in the update queue`;
+  }, [displayCount, hasError, isInitialLoading]);
+
+  const errorMessage = React.useMemo(() => {
+    if (!error) {
+      return null;
+    }
+    if (error instanceof Error) {
+      return error.message;
+    }
+    return 'Failed to load queue status.';
+  }, [error]);
+
+  return (
+    <div className="relative" ref={containerRef}>
+      <Button
+        type="button"
+        variant="ghost"
+        size="sm"
+        aria-haspopup="menu"
+        aria-expanded={open}
+        aria-label={ariaLabel}
+        onClick={() => setOpen((previous) => !previous)}
+        className="gap-2"
+      >
+        {isInitialLoading ? (
+          <Loader2 className="h-4 w-4 animate-spin" aria-hidden="true" />
+        ) : (
+          <ListTodo className="h-4 w-4" aria-hidden="true" />
+        )}
+        <span className="text-sm font-medium">{hasError ? '—' : displayCount}</span>
+      </Button>
+      {open && (
+        <div className="absolute right-0 z-20 mt-2 w-72 rounded-md border bg-popover p-3 text-popover-foreground shadow-lg">
+          <div className="mb-2 text-sm font-semibold">Update queue</div>
+          {isInitialLoading ? (
+            <p className="text-sm text-muted-foreground">Loading queue status…</p>
+          ) : hasError ? (
+            <p className="text-sm text-destructive">{errorMessage}</p>
+          ) : (
+            <div className="space-y-3 text-sm">
+              <div>
+                <div className="text-xs uppercase tracking-wide text-muted-foreground">Active job</div>
+                {activeJob ? (
+                  <div className="mt-1 rounded-md border bg-background px-3 py-2">
+                    <div className="font-medium">
+                      {formatRepositoryId(activeJob.organization, activeJob.repository)}
+                    </div>
+                    <div className="text-xs text-muted-foreground">
+                      {activeJob.enqueued_at ? (
+                        <span className="block">Queued {formatDateTime(activeJob.enqueued_at)}</span>
+                      ) : null}
+                      <span>Started {formatDateTime(activeJob.started_at)}</span>
+                    </div>
+                  </div>
+                ) : (
+                  <p className="mt-1 text-muted-foreground">No job is currently running.</p>
+                )}
+              </div>
+              <Separator />
+              <div>
+                <div className="flex items-center justify-between text-xs uppercase tracking-wide text-muted-foreground">
+                  <span>Queued jobs</span>
+                  <span>{queuedCount}</span>
+                </div>
+                {queuedJobs.length > 0 ? (
+                  <div className="mt-2 max-h-48 space-y-2 overflow-y-auto pr-1">
+                    {queuedJobs.map((job, index) => {
+                      const identifier = formatRepositoryId(job.organization, job.repository);
+                      return (
+                        <div key={`${identifier}-${index}`} className="rounded-md border bg-background px-3 py-2">
+                          <div className="font-medium">{identifier}</div>
+                          <div className="text-xs text-muted-foreground">
+                            Enqueued {formatDateTime(job.enqueued_at)}
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                ) : (
+                  <p className="mt-1 text-muted-foreground">Queue is empty.</p>
+                )}
+              </div>
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
 export default function HomePage() {
   const [activeView, setActiveView] = React.useState<ViewMode>('summaries');
   const {
@@ -418,6 +578,15 @@ export default function HomePage() {
     mutate: mutateLogs
   } = useSWR<LogsResponse>(activeView === 'logs' ? `${API_BASE_URL}/logs` : null, fetcher, {
     refreshInterval: 60_000,
+    revalidateOnFocus: false
+  });
+
+  const {
+    data: queueStatus,
+    error: queueError,
+    isLoading: queueLoading
+  } = useSWR<QueueStatusResponse>(`${API_BASE_URL}/queue`, fetcher, {
+    refreshInterval: 5_000,
     revalidateOnFocus: false
   });
 
@@ -614,6 +783,7 @@ export default function HomePage() {
           <p className="text-sm text-muted-foreground">Browse curated Markdown summaries across your favorite repositories.</p>
         </div>
         <div className="flex items-center gap-2">
+          <QueueStatusMenu status={queueStatus} isLoading={queueLoading} error={queueError} />
           <ThemeToggle />
           <SettingsMenu activeView={activeView} onSelectView={setActiveView} />
         </div>
