@@ -564,13 +564,7 @@ module UpdateViewer
   class RepositoryUpdateQueue
     class ShutdownError < StandardError; end
 
-    Job = Struct.new(:organization, :repository, :result_queue, keyword_init: true)
-
-    Result = Struct.new(:status, :generator_result, :error, :organization, :repository, keyword_init: true) do
-      def ok?
-        status == :ok
-      end
-    end
+    Job = Struct.new(:organization, :repository, keyword_init: true)
 
     SHUTDOWN_SENTINEL = Object.new
 
@@ -590,11 +584,10 @@ module UpdateViewer
     def enqueue(organization:, repository:)
       ensure_running!
 
-      result_queue = ::Queue.new
-      job = Job.new(organization: organization, repository: repository, result_queue: result_queue)
+      job = Job.new(organization: organization, repository: repository)
       track_enqueue(job)
       queue << job
-      result_queue.pop
+      true
     end
 
     def shutdown
@@ -642,32 +635,21 @@ module UpdateViewer
 
         mark_job_started(job)
 
-        result = process_job(job)
-        deliver_result(job, result)
+        process_job(job)
       rescue StandardError => e
-        logger.error("[queue] Fatal error while processing #{job.organization}/#{job.repository}: #{e.class}: #{e.message}")
-        fallback = Result.new(status: :unexpected_error, error: e, organization: job.organization, repository: job.repository)
-        deliver_result(job, fallback)
+        logger.error(
+          "[queue] Fatal error while processing #{job.organization}/#{job.repository}: #{e.class}: #{e.message}"
+        )
       ensure
         clear_active_job(job)
       end
-    end
-
-    def deliver_result(job, result)
-      job.result_queue << result
-    rescue StandardError => e
-      logger.error("[queue] Failed to deliver job result for #{job.organization}/#{job.repository}: #{e.class}: #{e.message}")
     end
 
     def process_job(job)
       logger.info("[queue] Starting repository update for #{job.organization}/#{job.repository}")
 
       generator = generator_factory.call(job.organization, job.repository)
-      initial_result = invoke_generator(job, generator)
-
-      return initial_result if initial_result.status != :ok
-
-      generator_result = initial_result.generator_result
+      generator_result = generator.call
 
       if generator_result&.output_path
         begin
@@ -676,51 +658,22 @@ module UpdateViewer
           logger.error(
             "[queue] Failed to register summary for #{job.organization}/#{job.repository} path=#{generator_result.output_path} error=#{e.class}: #{e.message}"
           )
-          return Result.new(
-            status: :registration_error,
-            generator_result: generator_result,
-            error: e,
-            organization: job.organization,
-            repository: job.repository
-          )
         end
       end
 
       logger.info("[queue] Completed repository update for #{job.organization}/#{job.repository}")
-
-      Result.new(
-        status: :ok,
-        generator_result: generator_result,
-        organization: job.organization,
-        repository: job.repository
+    rescue SummaryGenerator::ExecutionError => e
+      logger.error(
+        "[queue] Summary generation failed for #{job.organization}/#{job.repository}: status=#{e.status} stdout=#{sanitize_output(e.stdout)} stderr=#{sanitize_output(e.stderr)}"
+      )
+    rescue ArgumentError => e
+      logger.error(
+        "[queue] Invalid repository request for #{job.organization}/#{job.repository}: #{e.message}"
       )
     rescue StandardError => e
       logger.error(
         "[queue] Unexpected error while processing #{job.organization}/#{job.repository}: #{e.class}: #{e.message}"
       )
-      Result.new(
-        status: :unexpected_error,
-        error: e,
-        organization: job.organization,
-        repository: job.repository
-      )
-    end
-
-    def invoke_generator(job, generator)
-      result = generator.call
-      Result.new(
-        status: :ok,
-        generator_result: result,
-        organization: job.organization,
-        repository: job.repository
-      )
-    rescue SummaryGenerator::ExecutionError => e
-      logger.error(
-        "[queue] Summary generation failed for #{job.organization}/#{job.repository}: status=#{e.status} message=#{e.message}"
-      )
-      Result.new(status: :execution_error, error: e, organization: job.organization, repository: job.repository)
-    rescue ArgumentError => e
-      Result.new(status: :invalid_request, error: e, organization: job.organization, repository: job.repository)
     end
 
     def build_generator(organization, repository)
@@ -929,7 +882,7 @@ module UpdateViewer
             next({ error: e.message })
           end
 
-          queue_result = begin
+          begin
             repository_update_queue.enqueue(
               organization: repo[:organization],
               repository: repo[:repository]
@@ -942,7 +895,7 @@ module UpdateViewer
             next({ error: 'Update queue is unavailable. Please try again later.' })
           end
 
-          next(handle_generate_queue_result(repo, queue_result))
+          next(build_generate_enqueue_response(repo))
         end
 
         r.on String, String do |organization, repository|
@@ -1081,79 +1034,12 @@ module UpdateViewer
       nil
     end
 
-    def handle_generate_queue_result(repo, queue_result)
-      case queue_result.status
-      when :ok
-        build_generate_success_response(repo, queue_result.generator_result)
-      when :registration_error
-        log_registration_error(repo, queue_result)
-        build_registration_failure_response(repo, queue_result)
-      when :execution_error
-        log_execution_error(repo, queue_result.error)
-        build_execution_failure_response(queue_result.error)
-      when :invalid_request
-        response.status = 400
-        { error: queue_result.error&.message || 'Invalid repository request.' }
-      else
-        log_unexpected_queue_failure(repo, queue_result.error)
-        response.status = 500
-        { error: 'Failed to process repository update.' }
-      end
-    end
-
-    def build_generate_success_response(repo, generator_result)
-      response.status = 200
+    def build_generate_enqueue_response(repo)
+      response.status = 202
       {
-        message: 'Summary generation completed',
-        repository: repo,
-        output_path: generator_result&.output_path,
-        output_filename: generator_result&.output_path && File.basename(generator_result.output_path),
-        thread_id: generator_result&.thread_id,
-        stdout: (generator_result&.stdout).to_s.strip,
-        stderr: (generator_result&.stderr).to_s.strip
+        message: 'Repository update enqueued',
+        repository: repo
       }
-    end
-
-    def build_registration_failure_response(repo, queue_result)
-      response.status = 500
-      generator_result = queue_result.generator_result
-
-      {
-        error: 'Summary generated but failed to register output.',
-        repository: repo,
-        output_path: generator_result&.output_path,
-        output_filename: generator_result&.output_path && File.basename(generator_result.output_path),
-        detail: queue_result.error&.message
-      }
-    end
-
-    def build_execution_failure_response(error)
-      response.status = 500
-      {
-        error: error.message,
-        stdout: error.stdout.to_s.strip,
-        stderr: error.stderr.to_s.strip,
-        status: error.status
-      }
-    end
-
-    def log_registration_error(repo, queue_result)
-      generator_result = queue_result.generator_result
-      UpdateViewer.logger.error(
-        "[generate] Failed to register summary for #{repo[:organization]}/#{repo[:repository]} path=#{generator_result&.output_path} error=#{queue_result.error&.message}"
-      )
-    end
-
-    def log_execution_error(repo, error)
-      UpdateViewer.logger.error(
-        "[generate] Execution failed for #{repo[:organization]}/#{repo[:repository]} status=#{error.status} stdout=#{sanitize_output(error.stdout)} stderr=#{sanitize_output(error.stderr)}"
-      )
-    end
-
-    def log_unexpected_queue_failure(repo, error)
-      UpdateViewer.logger.error(
-        "[generate] Unexpected failure for #{repo[:organization]}/#{repo[:repository]} error=#{error&.class}: #{error&.message}"
-      )
     end
   end
 end
