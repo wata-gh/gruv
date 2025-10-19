@@ -95,14 +95,32 @@ async function main() {
     skipGitRepoCheck: true,
   });
 
-  let turn;
+  let finalResponse = "";
   try {
-    turn = await thread.run(prompt);
+    const { events } = await thread.runStreamed(prompt);
+    for await (const event of events) {
+      if (event.type === "item.completed") {
+        if (event.item?.type === "agent_message") {
+          finalResponse = event.item.text ?? "";
+        }
+      } else if (event.type === "turn.failed") {
+        const serializedError = JSON.stringify(event.error, null, 2);
+        await writeLogBlock(
+          `TURN_FAILED organization=${organization} repository=${repository} thread=${thread.id ?? "unknown"}`,
+          serializedError
+        );
+        throw new Error(
+          "Codex turn failed; see TURN_FAILED block in logs/update_summary.log for full MCP diagnostics."
+        );
+      } else if (event.type === "error") {
+        throw new Error(event.message);
+      }
+    }
   } catch (error) {
     await logAndExit("Codex failed to generate the summary", error);
   }
 
-  const content = turn.finalResponse?.trim();
+  const content = finalResponse.trim();
   if (!content) {
     await logAndExit("Codex returned an empty response.");
   }
