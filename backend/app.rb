@@ -676,6 +676,14 @@ module UpdateViewer
       )
     end
 
+    def sanitize_output(value, limit: 800)
+      text = value.to_s.strip
+      return '' if text.empty?
+      return text if text.length <= limit
+
+      "#{text[0, limit]}...(truncated)"
+    end
+
     def build_generator(organization, repository)
       SummaryGenerator.new(organization, repository)
     end
