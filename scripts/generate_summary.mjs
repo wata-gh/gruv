@@ -72,7 +72,7 @@ async function main() {
 
   const prompt = [
     `https://github.com/${organization}/${repository} のリポジトリについて`,
-    "直近１ヶ月の開発状況とリリースについてわかりやすい日本語でまとめてください。",
+    "直近１週間の開発状況とリリースについてわかりやすい日本語でまとめてください。",
     "最終的なMarkdown本文のみを出力し、余計な説明は加えないでください。",
     "フォーマットは以下を使用し、issue/discussion/pull-request にはリンクを貼ってください。",
     template.trim(),
