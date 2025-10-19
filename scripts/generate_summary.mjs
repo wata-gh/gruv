@@ -46,6 +46,7 @@ async function logAndExit(message, error) {
 }
 
 async function main() {
+  const startTime = Date.now();
   const [organization, repository] = process.argv.slice(2);
 
   if (!organization || !repository) {
@@ -101,8 +102,18 @@ async function main() {
     content
   );
 
+  const durationMs = Date.now() - startTime;
+  const totalSeconds = Math.max(0, Math.round(durationMs / 1000));
+  const minutes = Math.floor(totalSeconds / 60);
+  const seconds = totalSeconds % 60;
+  const formattedDuration = `作成時間: ${minutes} 分 ${seconds
+    .toString()
+    .padStart(2, "0")} 秒`;
+
+  const outputWithDuration = `${formattedDuration}\n\n${content}`;
+
   try {
-    await writeFile(outputPath, content, "utf8");
+    await writeFile(outputPath, outputWithDuration, "utf8");
   } catch (error) {
     await logAndExit(`Failed to write summary to ${outputPath}`, error);
   }
