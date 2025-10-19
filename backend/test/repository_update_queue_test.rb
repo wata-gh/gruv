@@ -1,6 +1,7 @@
 # frozen_string_literal: true
 
 require "stringio"
+require "timeout"
 
 require_relative "test_helper"
 
@@ -12,7 +13,7 @@ module UpdateViewer
     end
 
     def test_enqueue_processes_job_successfully
-      recorded_paths = []
+      recorded_paths = ::Queue.new
       catalog = Object.new
       catalog.define_singleton_method(:register_summary_from_path) do |path|
         recorded_paths << path
@@ -37,21 +38,20 @@ module UpdateViewer
         generator_factory: generator_factory
       )
 
-      result = queue.enqueue(organization: "octocat", repository: "hello-world")
+      enqueued = queue.enqueue(organization: "octocat", repository: "hello-world")
 
-      assert_equal :ok, result.status
-      assert_equal generator_result, result.generator_result
-      assert_equal "octocat", result.organization
-      assert_equal "hello-world", result.repository
-      assert_equal ["/tmp/generated.md"], recorded_paths
+      assert enqueued
+      assert_equal "/tmp/generated.md", wait_for_queue_value(recorded_paths)
+      wait_until_idle(queue)
     ensure
       queue&.shutdown
     end
 
-    def test_enqueue_returns_execution_error_when_generator_fails
+    def test_enqueue_logs_execution_error_when_generator_fails
+      register_calls = ::Queue.new
       catalog = Object.new
       catalog.define_singleton_method(:register_summary_from_path) do |_path|
-        flunk "register_summary_from_path should not be called when generator fails"
+        register_calls << :called
       end
 
       execution_error = SummaryGenerator::ExecutionError.new(
@@ -73,16 +73,17 @@ module UpdateViewer
         generator_factory: generator_factory
       )
 
-      result = queue.enqueue(organization: "octocat", repository: "broken")
+      enqueued = queue.enqueue(organization: "octocat", repository: "broken")
 
-      assert_equal :execution_error, result.status
-      assert_same execution_error, result.error
-      assert_nil result.generator_result
+      assert enqueued
+      wait_until_idle(queue)
+      assert register_calls.empty?, "register_summary_from_path should not be called"
+      assert_includes @logger_io.string, "[queue] Summary generation failed for octocat/broken"
     ensure
       queue&.shutdown
     end
 
-    def test_enqueue_returns_registration_error_when_catalog_update_fails
+    def test_enqueue_logs_registration_error_when_catalog_update_fails
       registration_error = StandardError.new("failed")
 
       catalog = Object.new
@@ -109,11 +110,14 @@ module UpdateViewer
         generator_factory: generator_factory
       )
 
-      result = queue.enqueue(organization: "octocat", repository: "failing")
+      enqueued = queue.enqueue(organization: "octocat", repository: "failing")
 
-      assert_equal :registration_error, result.status
-      assert_same generator_result, result.generator_result
-      assert_same registration_error, result.error
+      assert enqueued
+      wait_until_idle(queue)
+      assert_includes(
+        @logger_io.string,
+        "[queue] Failed to register summary for octocat/failing path=/tmp/output.md error=#{registration_error.class}: #{registration_error.message}"
+      )
     ensure
       queue&.shutdown
     end
@@ -147,11 +151,35 @@ module UpdateViewer
       first = queue.enqueue(organization: "alpha", repository: "one")
       second = queue.enqueue(organization: "beta", repository: "two")
 
-      assert_equal :ok, first.status
-      assert_equal :ok, second.status
+      assert first
+      assert second
+      wait_for(timeout: 2) { order.length == 2 ? order.dup : nil }
       assert_equal ["alpha/one", "beta/two"], order
     ensure
       queue&.shutdown
+    end
+
+    private
+
+    def wait_for_queue_value(queue, timeout: 2)
+      Timeout.timeout(timeout) { queue.pop }
+    end
+
+    def wait_until_idle(queue, timeout: 2)
+      wait_for(timeout: timeout) do
+        status = queue.status
+        status[:active_job].nil? && status[:jobs].empty? && status[:size].zero? ? true : nil
+      end
+    end
+
+    def wait_for(timeout: 2, interval: 0.01)
+      Timeout.timeout(timeout) do
+        loop do
+          value = yield
+          return value unless value.nil?
+          sleep interval
+        end
+      end
     end
   end
 end
