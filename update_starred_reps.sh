@@ -2,30 +2,29 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-UPDATE_SCRIPT="${SCRIPT_DIR}/update_summary.sh"
+DEFAULT_API_BASE_URL="http://localhost:9292"
+RAW_API_BASE_URL="${UPDATE_VIEWER_API_URL:-${GRUV_API_BASE_URL:-${API_BASE_URL:-$DEFAULT_API_BASE_URL}}}"
+if [[ -z $RAW_API_BASE_URL ]]; then
+  RAW_API_BASE_URL="$DEFAULT_API_BASE_URL"
+fi
+API_BASE_URL="${RAW_API_BASE_URL%/}"
+if [[ -z $API_BASE_URL ]]; then
+  API_BASE_URL="$DEFAULT_API_BASE_URL"
+fi
+QUEUE_ENDPOINT="${API_BASE_URL}/repos/generate"
 
 usage() {
   cat <<'USAGE' >&2
 Usage: update_starred_reps.sh [--dry-run] [-t <range>] [-h]
-  --dry-run    Print the repositories and commands without executing update_summary.sh.
+  --dry-run    Print the repositories and queue requests without contacting the update service.
   -t <range>   Time window for repo updates (default: 1w). Format: <number><unit>
                Units: d (days), w (weeks), m (months e.g. 30 days).
                Examples: 3d, 1w, 2m
   -h           Show this help.
 
 Requires: curl, python3, and a GitHub token in $GITHUB_PERSONAL_ACCESS_TOKEN with read:user & public_repo scopes.
+Set UPDATE_VIEWER_API_URL (or GRUV_API_BASE_URL / API_BASE_URL) to override the queue endpoint (default: http://localhost:9292).
 USAGE
-}
-
-validate_update_script() {
-  if [[ ! -x "$UPDATE_SCRIPT" ]]; then
-    if [[ -f "$UPDATE_SCRIPT" ]]; then
-      chmod +x "$UPDATE_SCRIPT"
-    else
-      printf 'Error: update_summary.sh not found at %s\n' "$UPDATE_SCRIPT" >&2
-      exit 1
-    fi
-  fi
 }
 
 parse_range() {
@@ -186,6 +185,81 @@ PY
   printf '%s\n' "${repos[@]}"
 }
 
+build_enqueue_payload() {
+  local owner="$1"
+  local repository="$2"
+
+  python3 - "$owner" "$repository" <<'PY'
+import json
+import sys
+
+if len(sys.argv) != 3:
+    raise SystemExit('invalid payload arguments')
+
+owner = sys.argv[1]
+repository = sys.argv[2]
+
+print(json.dumps({
+    "organization": owner,
+    "repository": repository
+}))
+PY
+}
+
+enqueue_repository_update() {
+  local owner="$1"
+  local repository="$2"
+  local dry_run_flag="$3"
+
+  local payload
+  if ! payload=$(build_enqueue_payload "$owner" "$repository"); then
+    printf 'Error: Failed to build enqueue payload for %s/%s.\n' "$owner" "$repository" >&2
+    return 1
+  fi
+
+  if [[ -z $payload ]]; then
+    printf 'Error: Empty enqueue payload for %s/%s.\n' "$owner" "$repository" >&2
+    return 1
+  fi
+
+  if [[ $dry_run_flag == true ]]; then
+    printf '[DRY-RUN] curl -sS -X POST -H "Content-Type: application/json" -d %q %s\n' "$payload" "$QUEUE_ENDPOINT"
+    return 0
+  fi
+
+  local response
+  if ! response=$(curl -sS -w '\n%{http_code}' -H "Content-Type: application/json" -X POST -d "$payload" "$QUEUE_ENDPOINT"); then
+    printf 'Error: Failed to contact update queue for %s/%s.\n' "$owner" "$repository" >&2
+    return 1
+  fi
+
+  local status_line
+  status_line=$(printf '%s\n' "$response" | tail -n1 | tr -d '\r')
+
+  local body
+  body=$(printf '%s\n' "$response" | sed '$d')
+
+  if [[ -z $status_line ]]; then
+    printf 'Error: Missing status line from update queue response for %s/%s.\n' "$owner" "$repository" >&2
+    return 1
+  fi
+
+  if [[ ! $status_line =~ ^[0-9]{3}$ ]]; then
+    printf 'Error: Unexpected status value "%s" from update queue for %s/%s.\n' "$status_line" "$owner" "$repository" >&2
+    return 1
+  fi
+
+  if (( status_line >= 400 )); then
+    printf 'Error: Update queue returned status %s for %s/%s. Response: %s\n' "$status_line" "$owner" "$repository" "$body" >&2
+    return 1
+  fi
+
+  printf 'Queue accepted update for %s/%s (status %s).\n' "$owner" "$repository" "$status_line"
+  if [[ -n $body ]]; then
+    printf '%s\n' "$body"
+  fi
+}
+
 main() {
   local range="1w"
   local dry_run=false
@@ -231,8 +305,6 @@ main() {
     exit 1
   fi
 
-  validate_update_script
-
   local cutoff_iso
   cutoff_iso=$(parse_range "$range")
 
@@ -253,15 +325,13 @@ main() {
     printf 'Processing %d repositories updated since %s...\n' "${#repos[@]}" "$cutoff_iso"
   fi
 
+  printf 'Using queue endpoint: %s\n' "$QUEUE_ENDPOINT"
+
   for full_name in "${repos[@]}"; do
     local owner=${full_name%%/*}
     local name=${full_name#*/}
-    printf 'Updating %s...\n' "$full_name"
-    if $dry_run; then
-      printf '[DRY-RUN] %s "%s" "%s"\n' "$UPDATE_SCRIPT" "$owner" "$name"
-    else
-      "$UPDATE_SCRIPT" "$owner" "$name"
-    fi
+    printf 'Queuing update for %s...\n' "$full_name"
+    enqueue_repository_update "$owner" "$name" "$dry_run"
   done
 }
 
