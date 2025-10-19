@@ -18,6 +18,24 @@ module UpdateViewer
       @logger ||= build_logger
     end
 
+    def catalog
+      @catalog ||= Catalog.new
+    end
+
+    def repository_update_queue
+      @repository_update_queue ||= build_repository_update_queue
+    end
+
+    def shutdown_repository_update_queue
+      return unless repository_update_queue_initialized?
+
+      queue = @repository_update_queue
+      @repository_update_queue = nil
+      queue.shutdown
+    rescue StandardError => e
+      logger.error("[shutdown] Failed to shut down repository update queue: #{e.class}: #{e.message}")
+    end
+
     private
 
     def build_logger
@@ -37,6 +55,14 @@ module UpdateViewer
       Logger.const_get(level_name)
     rescue NameError
       Logger::INFO
+    end
+
+    def repository_update_queue_initialized?
+      instance_variable_defined?(:@repository_update_queue) && @repository_update_queue
+    end
+
+    def build_repository_update_queue
+      RepositoryUpdateQueue.new(catalog: catalog)
     end
   end
 
@@ -851,9 +877,9 @@ module UpdateViewer
 
     def initialize(*args)
       super
-      @catalog = Catalog.new
+      @catalog = UpdateViewer.catalog
       @log_registry = LogRegistry.new
-      @repository_update_queue = RepositoryUpdateQueue.new(catalog: @catalog)
+      @repository_update_queue = UpdateViewer.repository_update_queue
     end
 
     route do |r|
@@ -1050,4 +1076,8 @@ module UpdateViewer
       }
     end
   end
+end
+
+at_exit do
+  UpdateViewer.shutdown_repository_update_queue
 end
