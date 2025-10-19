@@ -54,13 +54,22 @@ async function main() {
     process.exit(1);
   }
 
-  const today = new Date().toISOString().slice(0, 10);
+  const endDateUtc = new Date();
+  const startDateUtc = new Date(endDateUtc.getTime());
+  startDateUtc.setUTCDate(startDateUtc.getUTCDate() - 7);
+
+  const toIsoDate = (date) => date.toISOString().slice(0, 10);
+  const startDate = toIsoDate(startDateUtc);
+  const endDate = toIsoDate(endDateUtc);
+  const durationLabel = `直近7日間（${startDate} 〜 ${endDate}）`;
+
+  const today = endDate;
   const outputFile = `${organization}_${repository}_${today}.md`;
   const outputPath = path.join(REPO_ROOT, outputFile);
   const templatePath = path.join(REPO_ROOT, "template.md");
 
   await writeLog(
-    `START organization=${organization} repository=${repository} output=${outputFile}`
+    `START organization=${organization} repository=${repository} output=${outputFile} startDate=${startDate} endDate=${endDate} duration="${durationLabel}"`
   );
 
   let template;
@@ -72,6 +81,7 @@ async function main() {
 
   const prompt = [
     `https://github.com/${organization}/${repository} のリポジトリについて`,
+    `対象期間: ${durationLabel}。対象データは UTC ベースで ${startDate} 以降 ${endDate} までの更新を確認し、GitHub 検索では updated:>=${startDate} フィルタを利用してください。`,
     "直近１週間の開発状況とリリースについてわかりやすい日本語でまとめてください。",
     "最終的なMarkdown本文のみを出力し、余計な説明は加えないでください。",
     "フォーマットは以下を使用し、issue/discussion/pull-request にはリンクを貼ってください。",
