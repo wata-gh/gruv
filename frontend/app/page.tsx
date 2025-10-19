@@ -166,6 +166,95 @@ function formatLastUpdated(date: Date | null) {
   return `Last refreshed: ${date.toLocaleString()}`;
 }
 
+function extractDateFromFilename(filename?: string | null) {
+  if (!filename) {
+    return null;
+  }
+
+  const match = filename.match(/\d{4}-\d{2}-\d{2}/);
+  return match ? match[0] : null;
+}
+
+async function waitForSummaryAvailability(params: {
+  organization: string;
+  repository: string;
+  expectedDate?: string | null;
+  timeoutMs?: number;
+  pollIntervalMs?: number;
+}) {
+  const {
+    organization,
+    repository,
+    expectedDate,
+    timeoutMs = 60_000,
+    pollIntervalMs = 3_000
+  } = params;
+
+  const repoId = formatRepositoryId(organization, repository);
+  const deadline = Date.now() + timeoutMs;
+
+  while (Date.now() < deadline) {
+    let summaryReady = false;
+
+    if (expectedDate) {
+      try {
+        const historyResponse = await fetch(
+          `${API_BASE_URL}/repos/${encodeURIComponent(organization)}/${encodeURIComponent(repository)}/history`
+        );
+        if (historyResponse.ok) {
+          const historyData = (await historyResponse.json()) as HistoryResponse;
+          summaryReady = historyData.history?.some((item) => item.date === expectedDate) ?? false;
+        }
+      } catch (error) {
+        console.warn('Failed to check history while waiting for summary availability.', error);
+      }
+
+      if (!summaryReady) {
+        try {
+          const summaryResponse = await fetch(
+            `${API_BASE_URL}/repos/${encodeURIComponent(organization)}/${encodeURIComponent(repository)}/${expectedDate}`
+          );
+          summaryReady = summaryResponse.ok;
+        } catch (error) {
+          console.warn('Failed to check summary while waiting for availability.', error);
+        }
+      }
+
+      if (summaryReady) {
+        return;
+      }
+    }
+
+    try {
+      const queueResponse = await fetch(`${API_BASE_URL}/queue`);
+      if (queueResponse.ok) {
+        const queueData = (await queueResponse.json()) as QueueStatusResponse;
+        const isActive =
+          queueData.active_job !== null &&
+          formatRepositoryId(queueData.active_job.organization, queueData.active_job.repository) === repoId;
+        const isQueued = queueData.jobs.some(
+          (job) => formatRepositoryId(job.organization, job.repository) === repoId
+        );
+
+        if (!expectedDate && !isActive && !isQueued) {
+          return;
+        }
+
+        if (expectedDate && !isActive && !isQueued) {
+          // The job has finished processing but the summary has not appeared yet.
+          // Allow another polling cycle to pick up the new entry before timing out.
+        }
+      }
+    } catch (error) {
+      console.warn('Failed to check queue while waiting for summary availability.', error);
+    }
+
+    await new Promise((resolve) => setTimeout(resolve, pollIntervalMs));
+  }
+
+  throw new Error('Timed out waiting for summary to become available. Please try again later.');
+}
+
 function useRepositorySelection(repositories?: RepositorySummary[]) {
   const [selectedId, setSelectedId] = React.useState<string | null>(null);
 
@@ -727,14 +816,23 @@ export default function HomePage() {
 
       try {
         const result = await triggerGeneration({ organization: repo.organization, repository: repo.repository });
-        const messageSuffix = result.output_filename ? ` (${result.output_filename})` : '';
-        setStatusMessage({ type: 'success', text: `Summary generated for ${repoId}${messageSuffix}.` });
+        const expectedDate = extractDateFromFilename(result.output_filename);
+
+        await waitForSummaryAvailability({
+          organization: repo.organization,
+          repository: repo.repository,
+          expectedDate
+        });
+
         await mutateRepositories();
 
         if (selectedRepo && formatRepositoryId(selectedRepo.organization, selectedRepo.repository) === repoId) {
           setSelectedDate(null);
           await Promise.all([mutateHistory(), mutateSummary()]);
         }
+
+        const messageSuffix = result.output_filename ? ` (${result.output_filename})` : '';
+        setStatusMessage({ type: 'success', text: `Summary generated for ${repoId}${messageSuffix}.` });
       } catch (error) {
         const message = error instanceof Error ? error.message : 'Failed to generate summary.';
         setStatusMessage({ type: 'error', text: message });
@@ -758,20 +856,46 @@ export default function HomePage() {
     try {
       const result = await triggerGeneration({ url: trimmed });
       const repoId = formatRepositoryId(result.repository.organization, result.repository.repository);
+      const expectedDate = extractDateFromFilename(result.output_filename);
+
+      await waitForSummaryAvailability({
+        organization: result.repository.organization,
+        repository: result.repository.repository,
+        expectedDate
+      });
+
+      await mutateRepositories();
+
+      if (repoHistoryKey) {
+        await mutateHistory();
+      }
+
+      if (summaryKey) {
+        await mutateSummary();
+      }
+
       const messageSuffix = result.output_filename ? ` (${result.output_filename})` : '';
       setStatusMessage({ type: 'success', text: `Summary generated for ${repoId}${messageSuffix}.` });
       setNewRepoUrl('');
       setShowCreateForm(false);
       selectById(repoId);
       setSelectedDate(null);
-      await mutateRepositories();
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Failed to generate summary.';
       setStatusMessage({ type: 'error', text: message });
     } finally {
       setIsCreating(false);
     }
-  }, [mutateRepositories, newRepoUrl, selectById, triggerGeneration]);
+  }, [
+    mutateHistory,
+    mutateRepositories,
+    mutateSummary,
+    newRepoUrl,
+    repoHistoryKey,
+    selectById,
+    summaryKey,
+    triggerGeneration
+  ]);
 
   const isReady = !repositoriesLoading && !summaryLoading;
 
